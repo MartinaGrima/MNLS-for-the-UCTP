@@ -7,10 +7,18 @@ import pandas as pd
 import math
 import time
 
-Unit_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='YR1-4') # change sheet according to year
-Comb_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Combinations_4') # change sheet according to year
-Room_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Rooms')
-Lect_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Lecturers_4') # change sheet according to year
+# DATA FOR SMALL EXAMPLE (change directory as needed)
+Unit_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/small example/small_example_data.xlsx', sheet_name='Units')
+Comb_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/small example/small_example_data.xlsx', sheet_name='Combinations')
+Room_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/small example/small_example_data.xlsx', sheet_name='Rooms')
+Lect_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/small example/small_example_data.xlsx', sheet_name='Lecturers')
+
+# DATA FOR CHAPTER 5 INSTANCES (change directory as needed)
+# Unit_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='YR1-4') # change sheet according to year
+# Comb_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Combinations_4') # change sheet according to year
+# Room_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Rooms') # stays the same
+# Lect_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Lecturers_4') # change sheet according to year
+
 
 #print(Unit_data.head)
 #print(Unit_data.columns)
@@ -28,6 +36,7 @@ D = range(0,54,12) # gives the set [0, 12, 24, 36, 48] to distinguish between th
 Combs = Comb_data["Combinations"]
 App_Rooms = Unit_data["App_Rooms"]
 
+
 C=[]
 for c in range(len(Combs)):
     C = np.append(C,Combs[c].split())
@@ -44,6 +53,8 @@ L_card = len(L)
 D_card = len(D)
 C_card = len(Combs)
 
+
+
 def U_c(c): # combination index (return unit index)
     yr = int(C[c][0]) # year is column 1 # int() to return a number e.g., to return 4 instead of '4'
     field1 = C[c][1] # field 1 is column 2
@@ -58,6 +69,8 @@ def U_c(c): # combination index (return unit index)
                 units = np.append(units,i)
     return pd.unique(units)
         
+
+
 def U_l(l): # input lecturer index (row number)
     unit_mask = np.where(np.array(Unit_data["Lecturer_1"]) == L[l],True,False)
     unit_index = np.arange(0, len(U))[unit_mask]
@@ -69,11 +82,13 @@ def U_l(l): # input lecturer index (row number)
     unit_index = np.append(unit_index,np.append(unit_index2,unit_index3))
     unit_index = [int(u) for u in unit_index]
     return unit_index 
-    
+
+
 # R_u = rooms appropriate for unit u
 def R_u(u):
     rooms = [int(r) for r in App_Rooms[u].split('_')]   
     return rooms     
+
 
 # Q_l is the set of hours which lecturer l prefers not to have lectures
 def Q_l(l): 
@@ -84,8 +99,10 @@ def Q_l(l):
         hours_array = [int(h) for h in hours]
         return hours_array
     
+
 # Model formulation using Gurobi
 mdl = grb.Model('University Course Timetabling Problem') # naming the model
+
 
 # decision variables
 
@@ -195,11 +212,13 @@ for r in range(R_card):
     for t in T:
         mdl.addConstr((grb.quicksum(s[u]*x[u,r,t] for u in range(U_card)) ) <= cap[r])
 
+
 # OBJECTIVE FUNCTION
 
 #obj = 0 # objective function for feasible solution
 obj = grb.quicksum(grb.quicksum(grb.quicksum(grb.quicksum(x[u,r,t] for t in Q_l(l)) for r in range(R_card) ) for u in U_l(l) ) for l in range(L_card) ) + 3*grb.quicksum(grb.quicksum(max_final[c,d] + max_first[c,d] for d in D) for c in range(C_card)) + 2*grb.quicksum(grb.quicksum(v[c,d] for d in D) for c in range(C_card)) + 3*grb.quicksum(grb.quicksum(w[a,c] for c in range(C_card)) for a in A) + 2*grb.quicksum(grb.quicksum(y[l,d] for d in D) for l in range(L_card)) + 3*grb.quicksum(grb.quicksum(g[c,d] for d in D) for c in range(C_card)) 
 
+    
 # TIME LIMIT
 mdl.setParam('TimeLimit',4*60*60) # 4 hours
 
@@ -209,9 +228,10 @@ mdl.update()
 mdl.optimize()
 
 # output
-print("---------------------------------------------")
+print("-----------------------------------------------------------------------------------")
 for u in range(U_card):
     for r in range(R_card):
         for t in T:
             if x[u,r,t].x > 0.99: print(x[u,r,t],"with lecturer/s",Unit_data["Lecturer_1"][u],",",Unit_data["Lecturer_2"][u],",",Unit_data["Lecturer_3"][u]) 
-print("---------------------------------------------")
+print("-----------------------------------------------------------------------------------")
+
