@@ -7,10 +7,10 @@ import pandas as pd
 import math
 import time
 
-Unit_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='YR1-4')
-Comb_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Combinations_4')
+Unit_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='YR1-4') # change sheet according to year
+Comb_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Combinations_4') # change sheet according to year
 Room_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Rooms')
-Lect_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Lecturers_4')
+Lect_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Lecturers_4') # change sheet according to year
 
 #print(Unit_data.head)
 #print(Unit_data.columns)
