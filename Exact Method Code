@@ -1,0 +1,217 @@
+import gurobipy as grb 
+from gurobipy import Model, GRB, quicksum
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates
+import pandas as pd
+import math
+import time
+
+Unit_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='YR1-4')
+Comb_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Combinations_4')
+Room_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Rooms')
+Lect_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/Data_exact.xlsx', sheet_name='Lecturers_4')
+
+#print(Unit_data.head)
+#print(Unit_data.columns)
+
+U = Unit_data["Codes"] # all units
+R = Room_data["Room"] # all rooms
+T = list(range(1,61,1)) # timeslots (1 - 60)
+s = Unit_data["Number_of_students"]
+m = Unit_data["Hours_per_week"] # hours per week for each study-unit
+# Req = Unit_data["Requirements"] # Study-unit requirements
+cap = Room_data["Capacity"] # room capacity
+L = Lect_data['Lecturers']
+LH = Lect_data["Hours"] # hours where lecturers prefer not to be scheduled
+D = range(0,54,12) # gives the set [0, 12, 24, 36, 48] to distinguish between the different days
+Combs = Comb_data["Combinations"]
+App_Rooms = Unit_data["App_Rooms"]
+
+C=[]
+for c in range(len(Combs)):
+    C = np.append(C,Combs[c].split())
+C = C.reshape(len(Combs),3)
+
+A=[] 
+for i in range(1,60,12):
+    A = np.append(A,range(i,i+8))
+A = [int(a) for a in A] 
+
+U_card = len(U)
+R_card = len(R)
+L_card = len(L)
+D_card = len(D)
+C_card = len(Combs)
+
+def U_c(c): # combination index (return unit index)
+    yr = int(C[c][0]) # year is column 1 # int() to return a number e.g., to return 4 instead of '4'
+    field1 = C[c][1] # field 1 is column 2
+    field2 = C[c][2]
+    units=[] # empty vector of units to later append
+    # finding units from that year from field 1:
+    for i in range(U_card): # to go over each row of Unit_data
+        if Unit_data["Year_1"][i] == yr or  Unit_data["Year_2"][i] == yr:
+            if Unit_data["Field_1"][i] == field1 or Unit_data["Field_2"][i] == field1 or Unit_data["Field_3"][i] == field1 or Unit_data["Field_4"][i] == field1:
+                units = np.append(units,i)
+            if Unit_data["Field_1"][i] == field2 or Unit_data["Field_2"][i] == field2 or Unit_data["Field_3"][i] == field2 or Unit_data["Field_4"][i] == field2:
+                units = np.append(units,i)
+    return pd.unique(units)
+        
+def U_l(l): # input lecturer index (row number)
+    unit_mask = np.where(np.array(Unit_data["Lecturer_1"]) == L[l],True,False)
+    unit_index = np.arange(0, len(U))[unit_mask]
+    # looking in other lecturers columns
+    unit_mask2 = np.where(np.array(Unit_data["Lecturer_2"]) == L[l],True,False)
+    unit_index2 = np.arange(0, len(U))[unit_mask2]
+    unit_mask3 = np.where(np.array(Unit_data["Lecturer_3"]) == L[l],True,False)
+    unit_index3 = np.arange(0, len(U))[unit_mask3]
+    unit_index = np.append(unit_index,np.append(unit_index2,unit_index3))
+    unit_index = [int(u) for u in unit_index]
+    return unit_index 
+    
+# R_u = rooms appropriate for unit u
+def R_u(u):
+    rooms = [int(r) for r in App_Rooms[u].split('_')]   
+    return rooms     
+
+# Q_l is the set of hours which lecturer l prefers not to have lectures
+def Q_l(l): 
+    if pd.isna(LH[l]) == True: # if that lecturer does not have preferred times, return an empty set
+        return []
+    else:
+        hours = str(LH[l]).split(",") # splitting hours by comma
+        hours_array = [int(h) for h in hours]
+        return hours_array
+    
+# Model formulation using Gurobi
+mdl = grb.Model('University Course Timetabling Problem') # naming the model
+
+# decision variables
+
+x ={}
+for u in range(U_card):
+    for r in range(R_card):
+        for t in T:
+            x[u,r,t] = mdl.addVar(vtype = grb.GRB.BINARY, name = 'x' + '_' +  str(U[u]) + ',' + str(R[r]) + ',' + str(t))
+            
+max_final = {} # SC5: min time at uni
+for c in range(C_card):
+    for d in D:
+        max_final[c,d] = mdl.addVar(vtype = grb.GRB.INTEGER,lb = 0, name = 'final lesson time' + ',' + str(c) + ',' + str(d))
+
+max_first = {} # SC5: min time at uni
+for c in range(C_card):
+    for d in D:
+        max_first[c,d] = mdl.addVar(vtype = grb.GRB.INTEGER,lb = -72, name = 'first lesson time' + ',' + str(c) + ',' + str(d))
+
+v = {} #SC1: one unit a day
+for c in range(C_card):
+    for d in D:
+        v[c,d] = mdl.addVar(vtype = grb.GRB.BINARY, name = 'v' + str(c) + ',' + str(d))
+    
+v_star = {} #SC1: one unit a day
+for c in range(C_card):
+    for d in D:
+        v_star[c,d] = mdl.addVar(vtype = grb.GRB.BINARY, name = 'v*' + str(c) + ',' + str(d))
+
+w = {} #SC2: 4 consecutive lectures 
+for a in A:
+    for c in range(C_card):
+        w[a,c] = mdl.addVar(vtype = grb.GRB.INTEGER, lb = 0, name = 'w' + ',' + str(a) + 'to' + str(a+3) + ',' + 'comb' + str(c))
+    
+y = {} # SC3: lect max 4 hrs a day
+for l in range(L_card):
+    for d in D:
+        y[l,d] = mdl.addVar(vtype = grb.GRB.INTEGER,lb = 0, name = 'hours exceeded for lecturer' + str(L[l]) + 'for day' + str(int(d/12 + 1)))
+
+g = {} # SC6: students max 6 hrs a day
+for c in range(C_card):
+    for d in D:
+        g[c,d] = mdl.addVar(vtype = grb.GRB.INTEGER,lb = 0, name = 'hours exceeded for students of combination ' + str(c) + 'for day' + str(int(d/12 + 1)))
+
+# SC 4 (lecturer's preferred hrs) will be defined in the objective function using x_urt
+
+# CONSTRAINTS    
+
+# Hard Constraint 2: study-units are only allocated to appropriate rooms
+for u in range(U_card):
+    for r in range(R_card):
+        if r not in R_u(u): # r NOT one of the appropriate rooms
+            for t in T:
+                mdl.addConstr(x[u,r,t]==0) # setting it equal to 0  
+
+# Soft Cosntraint 5: minimize time at university
+for c in range(C_card):
+    for d in D:
+        mdl.addConstr(max_first[c,d] >= (-72)*grb.quicksum(grb.quicksum(grb.quicksum(x[u,r,t] for t in range(d+1,d+13) )for u in U_c(c)) for r in range(R_card)))
+        for t in range(d+1,d+13):
+            mdl.addConstr(max_final[c,d] >= (t+1)*grb.quicksum(grb.quicksum(x[u,r,t] for u in U_c(c)) for r in range(R_card)) )
+            mdl.addConstr(max_first[c,d] >= - t - 12*(1 - grb.quicksum(grb.quicksum(x[u,r,t] for u in U_c(c)) for r in range(R_card)) ))
+
+# Soft Constraint 1: Students should not have only one lecture in a day
+for c in range(C_card):
+    for d in D:
+        mdl.addConstr( v[c,d] + 2*v_star[c,d] - grb.quicksum(grb.quicksum(grb.quicksum(x[u,r,t] for t in range(d+1,d+13)) for r in range(R_card)) for u in U_c(c)) <= 0 )
+        mdl.addConstr( v[c,d] + 12*v_star[c,d] - grb.quicksum(grb.quicksum(grb.quicksum(x[u,r,t] for t in range(d+1,d+13)) for r in range(R_card)) for u in U_c(c)) >= 0 )
+        mdl.addConstr( v[c,d] + v_star[c,d] <= 1 )        
+
+# Soft Constraint 2: Students should not have more than 4 consecutive lectures
+for a in A:
+    for c in range(C_card):
+        mdl.addConstr(w[a,c] >= grb.quicksum(grb.quicksum(grb.quicksum(x[u,r,t] for t in range(a,a+5)) for r in range(R_card)) for u in U_c(c)) - 4)
+
+# Soft Constraint 3: Lecturers should not have more than 4 lectures a day
+for l in range(L_card):
+    for d in D:
+        mdl.addConstr(y[l,d] >= grb.quicksum(grb.quicksum(grb.quicksum(x[u,r,t] for t in range(d+1,d+13) ) for r in range(R_card)) for u in U_l(l)) - 4 )
+
+# Soft Constraint 6: students should not have moret han 6 lectures a day
+for c in range(C_card):
+    for d in D:
+        mdl.addConstr(g[c,d] >= grb.quicksum(grb.quicksum(grb.quicksum(x[u,r,t] for t in range(d+1,d+13) ) for r in range(R_card)) for u in U_c(c)) - 6 )
+
+# Hard Constraint 1: one sstudy-unit in a room at any time-slot
+for r in range(R_card):
+    for t in T:
+        mdl.addConstr((grb.quicksum(x[u,r,t] for u in range(U_card) )) <= 1)
+
+# Hard Constraint 5: Units from the same combination should not be scheduled at the same time
+for c in range(C_card):
+    for t in T: 
+        mdl.addConstr((grb.quicksum(grb.quicksum(x[u,r,t] for u in U_c(c) ) for r in range(R_card))) <= 1)
+
+# Hard Constraint 3: Study-units need to reach their required number of hours a week
+for u in range(U_card):
+    mdl.addConstr((grb.quicksum(grb.quicksum(x[u,r,t] for t in T ) for r in R_u(u))) == m[u])             
+        
+# Hard Constraint 4: Lecturers have one unit at a time
+for l in range(L_card):
+     for t in T: 
+         mdl.addConstr((grb.quicksum(grb.quicksum(x[u,r,t] for u in U_l(l) ) for r in range(R_card))) <= 1)
+
+# Hard Constraint 6: Capacity constraint
+for r in range(R_card):
+    for t in T:
+        mdl.addConstr((grb.quicksum(s[u]*x[u,r,t] for u in range(U_card)) ) <= cap[r])
+
+# OBJECTIVE FUNCTION
+
+#obj = 0 # objective function for feasible solution
+obj = grb.quicksum(grb.quicksum(grb.quicksum(grb.quicksum(x[u,r,t] for t in Q_l(l)) for r in range(R_card) ) for u in U_l(l) ) for l in range(L_card) ) + 3*grb.quicksum(grb.quicksum(max_final[c,d] + max_first[c,d] for d in D) for c in range(C_card)) + 2*grb.quicksum(grb.quicksum(v[c,d] for d in D) for c in range(C_card)) + 3*grb.quicksum(grb.quicksum(w[a,c] for c in range(C_card)) for a in A) + 2*grb.quicksum(grb.quicksum(y[l,d] for d in D) for l in range(L_card)) + 3*grb.quicksum(grb.quicksum(g[c,d] for d in D) for c in range(C_card)) 
+
+# TIME LIMIT
+mdl.setParam('TimeLimit',4*60*60) # 4 hours
+
+mdl.setObjective(obj)
+mdl.ModelSense = grb.GRB.MINIMIZE
+mdl.update()
+mdl.optimize()
+
+# output
+print("---------------------------------------------")
+for u in range(U_card):
+    for r in range(R_card):
+        for t in T:
+            if x[u,r,t].x > 0.99: print(x[u,r,t],"with lecturer/s",Unit_data["Lecturer_1"][u],",",Unit_data["Lecturer_2"][u],",",Unit_data["Lecturer_3"][u]) 
+print("---------------------------------------------")
