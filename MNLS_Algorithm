@@ -1,0 +1,1893 @@
+
+# Packages
+import numpy as np
+import pandas as pd
+import random
+from random import randrange
+import math
+import matplotlib.pyplot as plt
+import time
+
+# use MNLS_data for this code
+Unit_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/MNLS_Data.xlsx', sheet_name='YR1') # change sheet according to year
+Comb_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/MNLS_Data.xlsx', sheet_name='Combinations_1') # change sheet according to year
+Room_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/MNLS_Data.xlsx', sheet_name='Rooms')  # stays the same
+Lect_data = pd.read_excel(r'/Users/martinagrima/Desktop/TEZI/data/MNLS_Data.xlsx', sheet_name='Lecturers_1') # change sheet according to year
+
+
+U = Unit_data["Codes"] # all units 
+R = Room_data["Room"] # all rooms
+T = list(range(1,61,1)) # timeslots (1 - 60)
+s = Unit_data["Number_of_students"]
+m = Unit_data["Hours_per_week"] # hours per week for each study-unit
+Req = Unit_data["Requirements"] # Study-unit requirements
+cap = Room_data["Capacity"] # room capacity
+L = Lect_data['Lecturers']# all lecturers
+ # all lecturers
+LH = Lect_data["Hours"] # hours where lecturers prefer not to be scheduled
+D = range(0,54,12) # gives the set [0, 12, 24, 36, 48] to distinguish between the different days
+Combs = Comb_data["Combinations"]
+App_Rooms = Unit_data["App_Rooms"]
+
+# creating a separate vector of study unit indexes  to later remove ones that are assigned
+unit_vec = list(range(0,len(U))) 
+
+# this vector gives how many timeslots are available for each unit
+# initially each units has 60 timeslots in which they can be scheduled
+greedy_vec = [60] * len(unit_vec)
+
+C=[]
+for c in range(len(Combs)):
+    C = np.append(C,Combs[c].split())
+C = C.reshape(len(Combs),3)
+
+U_card = len(U)
+R_card = len(R)
+L_card = len(L)
+D_card = len(D)
+C_card = len(Combs)
+
+
+def U_c(c): # combination index (return unit index)
+    yr = int(C[c][0]) # year is column 1 # int() to return a number e.g., to return 4 instead of '4'
+    field1 = C[c][1] # field 1 is column 2
+    field2 = C[c][2]
+    units=[] # empty vector of units to later append
+    # finding units from that year from field 1:
+    for i in range(U_card): # to go over each row of Unit_data
+        if Unit_data["Year_1"][i] == yr or  Unit_data["Year_2"][i] == yr:
+            if Unit_data["Field_1"][i] == field1 or Unit_data["Field_2"][i] == field1 or Unit_data["Field_3"][i] == field1 or Unit_data["Field_4"][i] == field1:
+                units = np.append(units,i)
+            if Unit_data["Field_1"][i] == field2 or Unit_data["Field_2"][i] == field2 or Unit_data["Field_3"][i] == field2 or Unit_data["Field_4"][i] == field2:
+                units = np.append(units,i)
+    return pd.unique(units)
+        
+
+def U_l(l): # input lecturer number
+    unit_mask = np.where(np.array(Unit_data["Lecturer_1"]) == l,True,False)
+    unit_index = np.arange(0, len(U))[unit_mask]
+    # looking in other lecturers columns
+    unit_mask2 = np.where(np.array(Unit_data["Lecturer_2"]) == l,True,False)
+    unit_index2 = np.arange(0, len(U))[unit_mask2]
+    unit_mask3 = np.where(np.array(Unit_data["Lecturer_3"]) == l,True,False)
+    unit_index3 = np.arange(0, len(U))[unit_mask3]
+    unit_index = np.append(unit_index,np.append(unit_index2,unit_index3))
+    unit_index = [int(u) for u in unit_index]
+    return unit_index 
+
+
+# R_u = rooms appropriate for unit u
+def R_u(u):
+    rooms = [int(r) for r in App_Rooms[u].split('_')]   
+    return rooms     
+
+
+# Q_l is the set of hours which lecturer l prefers not to have lectures
+def Q_l(l): 
+    if pd.isna(LH[l-1]) == True: # hours - 1 because indexing in python starts from 0 not 1. 
+        return [] # if that lecturer does not have preferred times, return an empty set
+    else:
+        hours = str(LH[l-1]).split(",") # splitting hours by comma
+        hours_array = [int(h)-1 for h in hours]
+        return hours_array
+    
+
+# creating a function which finds specific (unique) values in a matrix
+def matrix_find(matrix,value):
+    for i in range(len(matrix)): # no of rows
+        for j in range(len(matrix[0])): # no of cols
+            if matrix[i,j] == value:
+                pos = [i,j]
+    return pos
+
+# lecturers of unit u
+def unit_lect(u):
+    lect = []
+    lect = np.append(lect,Unit_data["Lecturer_1"][u])
+    if Unit_data["Lecturer_2"][u]>=0:
+        lect = np.append(lect,Unit_data["Lecturer_2"][u]) # lecturer 2 for this unit
+    if Unit_data["Lecturer_3"][u]>=0:
+        lect = np.append(lect,Unit_data["Lecturer_3"][u]) # lecturer 3 for this unit
+    return lect
+
+# function that finds which combination/s a unit belongs to
+def unit_comb(unit):
+    comb = []
+    for c in range(len(Combs)):
+        for u in range(len(U_c(c))):
+            if U_c(c)[u] == unit:
+                comb = np.append(comb,c)
+    return comb
+
+#%% INITIAL FEASIBLE SOLUTION - GREEDY METHOD
+
+# creating a matrix of -1s (room x timeslot)
+# a -1 indicates that this room-timeslot pair has no unit assigned 
+rt_mat = -np.ones((len(Room_data),60))
+
+assigned_units = [] # this will be the vector showing the units that have been previously assigned
+
+all_pairs = []
+for r in range(R_card):
+    for t in T:
+        all_pairs.append([r,t-1])
+
+# THE FOLLOWNG NEEDS TO GO IN A LOOP
+while len(unit_vec) > 0:
+
+    # randomly choose another unit from those that are left
+    # first find those units that have the least number of hours in which they can be scheduled
+    smallest = min(greedy_vec) # finding smallest value
+    # entering all units that have the same number of available hours to be scheduled
+    hours_mask = np.where(np.array(greedy_vec) == smallest,True,False) # finding which units have the same number of 
+    hours_index = np.arange(0, len(greedy_vec))[hours_mask]
+    pick = [unit_vec[i] for i in hours_index] # pick new unit from these (randomly)
+    #picked_rnd = randrange(len(pick)) # this will be an index not the actual unit number 
+    new_unit = random.choice(pick)#[picked_rnd] # actual unit number
+
+    # this unit can only be assigned in one of its appropriate rooms (Constraint 2) therefore we will use the subset of pairs that includes one these
+    app_pairs = list(filter(lambda pair: pair[0] in R_u(new_unit),all_pairs))
+
+    # for the first unit ONLY we have already chosen a timeslot and so we need to have aonly that timeslot in app_pairs
+    # the first unit should be scheduled in the morning. The rest scheduled randomly
+    # when picking the first unit, the vector assigned_units is still empty 
+    if assigned_units == []:
+
+      # assigning a timeslot
+      morning_hours = [] # start with an empty vector
+      for i in range(0,59,12):
+          morning_hours = np.append(morning_hours,range(i,i+4))
+      morning_hours = [int(a) for a in morning_hours]
+      picked_hour = random.choice(morning_hours)#[randrange(len(morning_hours))]
+
+      # subsetting app_pairs to only include the chosen timeslot
+      app_pairs = list(filter(lambda pair: pair[1] == picked_hour,app_pairs))
+
+    
+              
+    rem_time = []
+    #CONSTRAINT 4: LECTURERS CANNOT HAVE MORE THAN ONE LECTURE AT A TIME
+    for l in unit_lect(new_unit):
+       for i in U_l(l): # go over each unit taught by that lecturer                
+            if i in assigned_units: # if a unit taught by that lecturer has been assigned, find position in rt_matrix and 
+                rem_time = np.append(rem_time, matrix_find(rt_mat, i)[1]) # times to remove
+    # CONSTRAINT 5: UNITS FROM THE SAME COURSE SHOULD NOT BE SCHEDULED AT THE SAME TIME
+    for c in unit_comb(new_unit):
+        for u in U_c(int(c)):
+            if u in assigned_units:
+                rem_time = np.append(rem_time,matrix_find(rt_mat, u)[1])                
+    rem_time = np.unique(rem_time)                      
+    # removing these indices in the next step along with constraint 3
+        
+    
+            
+    # in order to remove multiple elements using indices, we need ot order the indices from largest to smallest
+    # rem_indices = np.unique(sorted(rem_indices, reverse = True))
+    # rem_indices = list(rem_indices)
+    # rem_indices.sort(reverse=True)    
+    # for i in rem_indices:
+    #     del app_pairs[int(i)]    
+    app_pairs = list(filter(lambda pair: pair[1] not in rem_time,app_pairs))
+    # CONSTRAINT 6: ROOM SHOULD BE ABLE TO HOLD NUMBER OF STUDENTS
+
+    # R_u(new_unit) appropriate rooms for new_unit 
+    # need to check capacities
+    av_rooms = [] # rooms that satisfy capacity
+    for r in R_u(new_unit):
+       if cap[r] >= s[new_unit]:
+            av_rooms = np.append(av_rooms,r)
+       cap_rooms = [cap[r] for r in av_rooms]
+
+    # ordering rooms by size (smallest first)
+    Z = [x for _,x in sorted(zip(cap_rooms,av_rooms))]
+
+    # choosing the room with the smallest capacity
+    smallest_index = cap_rooms.index(min(cap_rooms))
+    assigned_room = av_rooms[smallest_index]
+
+
+    count = 1
+    these_pairs = []
+    while count <= len(Z):
+        try_room = Z[count-1] 
+        for i in range(len(app_pairs)):
+            if app_pairs[i][0] == try_room:
+                these_pairs.append(app_pairs[i])
+        if len(these_pairs) > 0:
+            break # to stop while loop because at least one appropriate room-time pair was found with the room of the smallest size (that fits number of students)
+        if len(these_pairs) == 0: 
+            count = count + 1 # if no appropraite room-time pair was found, then add 1 to count to try the next room with a bigger size
+
+    # FINALLY all non feasible room-timselot pairs have been removed and we can choose a random one from the ones that remain to assign new_unit
+    if these_pairs == []: 
+        print('No feasible solution can be found')
+        break
+
+    #assigned_index = randrange(len(these_pairs))
+    assigned = random.choice(these_pairs)
+    assigned_room = assigned[0]
+    assigned_time = assigned[1]
+
+    # assigning to matrix
+    rt_mat[int(assigned_room),int(assigned_time)] = new_unit 
+
+    assigned_units = np.append(assigned_units,new_unit) 
+
+    # removing the assigned unit from unit_vec list
+    # need to delete the corresponding idnex from greedy_alg
+
+    rem = unit_vec.index(new_unit, 0, len(unit_vec))
+
+    unit_vec.remove(new_unit)
+    del greedy_vec[rem]
+
+    # removing the pair that has a unit assigned
+    rem_index = all_pairs.index([assigned_room,assigned_time], 0, len(all_pairs)) # finding index to remove
+    del all_pairs[rem_index]
+
+    # we need to subtract 1 from units in the same combination as the unit that was just assigned
+    # we also need to remove 1 from the units that are not in the same combination but have the same lecturer
+
+    # 1. Removing 1 from the units in the same combination
+    dont_rem = [] # the units that will be added in this array have already had a 1 subtracted
+    # units in this vector will not have any more subtractions due to them being in more than one combination
+    for c in range(C_card): # go over each course combination
+        if new_unit in U_c(c): # if the unit that was just assigned is in this combination:
+            for u in range(len(U_c(c))): # go over each unit from the same combination:
+                current_unit = U_c(c)[int(u)]
+                if current_unit not in dont_rem: # if this unit hasn't already had a -1:
+                    if current_unit in unit_vec: # if a unit form this combination is still to be assigned:
+                        unit_mask = np.where(np.array(unit_vec) == current_unit,True,False)
+                        unit_index = np.arange(0, len(unit_vec))[unit_mask] # find index of this unit in unit_vec
+                        greedy_vec[int(unit_index)] = greedy_vec[int(unit_index)]-1 # subtract 1 from greedy_vec using this index (i.e., this unit has one less timeslot in which it can be assigned)
+                dont_rem = np.append(dont_rem,current_unit)
+
+    # now for units taught by these lecturers, subtract 1 if not already done
+    for l in unit_lect(new_unit):
+        for u in U_l(l): # go over each unit taught by that lecturer
+            if u not in dont_rem: # for those units that we didn't already subtract 1
+                if u in unit_vec:
+                    unit_mask = np.where(np.array(unit_vec) == u,True,False)
+                    unit_index = np.arange(0, len(unit_vec))[unit_mask] # find index of this unit in unit_vec
+                    greedy_vec[int(unit_index)] = greedy_vec[int(unit_index)]-1 # subtract 1 from greedy_vec using this index (i.e., this unit has one less timeslot in which it can be assigned)
+                    dont_rem = np.append(dont_rem,u)
+
+    print(len(unit_vec),' units left to assign')
+
+# CONSTRAINT 3: EACH UNIT MUST REACH THE REQUIRED NUMBER OF HOURS A WEEK
+# this will be satisfied by assigning every unit in our data
+# as long as we have a feasible solution, then this constraint is satisfied
+
+
+
+
+#%% IMPROVING INITIAL SOLUTION multi-neighborhood local search
+
+
+A=[] # this will be used when cosnidering 5 tiemslots in a row. Every 8 numbers there is a gap of 4. this is so that we dont consider two days at once 
+for i in range(0,60,12): # these times should be 1,13,15,37,49 (starting times of each day) but we need them -1 for the matrix dimensions
+    A = np.append(A,range(i,i+8))
+A = [int(a) for a in A]
+
+D = list(range(0,60,12))
+
+units = list(range(0,len(U))) 
+
+# function to get column of a multidimensional array
+def column(matrix, i):
+    return [row[i] for row in matrix]
+
+# function to get array of times units of combination c are scheduled
+def T_c(mat,c): # (timetable,combination)
+    times = [matrix_find(mat,u)[1] for u in U_c(c)]
+    return times
+
+# function to get array of times units taught by lecturer l (index) are scheduled
+def T_l(mat,l):
+    times = [matrix_find(mat,u)[1] for u in U_l(l)]
+    return times
+
+
+def tally(arr,num1,num2): # count number of elements in an array that are between two numbers
+    count = 0
+    for i in arr:
+        if num1 <= i <= num2:
+            count = count + 1
+    return count
+
+def units_day_comb(mat,day_index,c): # get units from combination c on that day (in order of appearance)
+    # using day INDEX (index 0 -> day 1 ... index 4 -> day 5)
+    units_day = []
+    if day_index == 0: # Monday
+        t = list(range(12))
+    if day_index == 1: # Tuesday
+        t = list(range(12,24))
+    if day_index == 2: # Wednesday
+        t = list(range(24,36))
+    if day_index == 3: # Thursday
+        t = list(range(36,48))    
+    if day_index == 4: # Friday
+        t = list(range(48,60))
+    for i in t:
+        units_at_t = column(mat,i)
+        for j in units_at_t: 
+            if j in U_c(c):
+                units_day = np.append(units_day,j)
+                
+    return units_day
+
+def units_day_lect(mat,day_index,l): # get units taught by lecturer l on that day (in order of appearance)
+    # using day INDEX (index 0 -> day 1 ... index 4 -> day 5)
+    units_day = []
+    if day_index == 0: # Monday
+        t = list(range(12))
+    if day_index == 1: # Tuesday
+        t = list(range(12,24))
+    if day_index == 2: # Wednesday
+        t = list(range(24,36))
+    if day_index == 3: # Thursday
+        t = list(range(36,48))    
+    if day_index == 4: # Friday
+        t = list(range(48,60))
+    for i in t:
+        units_at_t = column(mat,i)
+        for j in units_at_t: 
+            if j in U_l(l):
+                units_day = np.append(units_day,j)
+                
+    return units_day
+
+def times_day_comb(mat,day_index,c): # get units from combination c on that day (in order of appearance)
+    # using day INDEX (index 0 -> day 1 ... index 4 -> day 5)
+    times_day = []
+    if day_index == 0: # Monday
+        t = list(range(12))
+    if day_index == 1: # Tuesday
+        t = list(range(12,24))
+    if day_index == 2: # Wednesday
+        t = list(range(24,36))
+    if day_index == 3: # Thursday
+        t = list(range(36,48))    
+    if day_index == 4: # Friday
+        t = list(range(48,60))
+    for i in t:
+        units_at_t = column(mat,i)
+        for j in units_at_t: 
+            if j in U_c(c):
+                times_day = np.append(times_day,i)
+                
+    return times_day
+
+
+def times_of_day(day_index): # for a day index, return an array of timeslots in that day
+    if day_index == 0:
+        times = list(range(0,12))
+    if day_index == 1:
+        times = list(range(12,24))
+    if day_index == 2:
+        times = list(range(24,36))
+    if day_index == 3:
+        times = list(range(36,48))
+    if day_index == 4:
+        times = list(range(48,60))
+    return times
+
+
+# THESE AREN'T TAKEN IN THE ORDER THEY ARE MENTIONED IN THE WRITE UP
+
+def SC1(mat): # penalty added for SC1 violation - 1hr/day
+    obj = 0
+    for c in range(C_card):
+        day1 = 0
+        day2 = 0
+        day3 = 0
+        day4 = 0 
+        day5 = 0
+        times = T_c(mat,c) # times that units from combination c are scheduled
+        day1 = tally(times,0,11) # number of units on day 1
+        day2 = tally(times,12,23)# number of units on day 2
+        day3 = tally(times,24,35) # number of units on day 3
+        day4 = tally(times,36,47) # number of units on day 4
+        day5 = tally(times,48,59) # number of units on day 5
+        if day1 == 1:
+            obj = obj + 2
+        if day2 == 1:
+            obj = obj + 2
+        if day3 == 1:
+            obj = obj + 2
+        if day4 == 1:
+            obj = obj + 2
+        if day5 == 1:
+            obj = obj + 2
+    return obj
+
+def SC2(mat): # 4 consecutive hrs
+    obj = 0
+    for c in range(C_card):
+        for a in A:
+            cons = []
+            span = []
+            for v in range(a,a+5):
+                span.append(column(mat,v)) # these are the 5 timeslots we are considering at a time
+            for i in range(len(span)): # number of rows
+                if sum(span[i]) > -7: # if the row is not empty
+                    for j in range(len(span[0])): # number of cols
+                        if span[i][j] in U_c(c):
+                            cons = np.append(cons,span[i][j]) # if this array is longer than 4, i.e., more than 4 lectures in a span of 5 timeslots, add a penalty
+            if len(cons)>4: 
+                #print(cons)
+                obj = obj + 3 # THIS PEANLTY IS BEING ADDED FOR EACH UNIT THAT BREAKS THE NOT MORE THAN 4 CONSTRAINT
+    return obj
+
+def SC3(mat): # minimize time at uni
+    obj = 0
+    for c in range(C_card):
+        day1 = []
+        day2 = []
+        day3 = []
+        day4 = [] 
+        day5 = []
+        total_1 = 0
+        total_2 = 0
+        total_3 = 0
+        total_4 = 0
+        total_5 = 0
+        day1 = times_day_comb(mat,0,c)
+        day2 = times_day_comb(mat,1,c)
+        day3 = times_day_comb(mat,2,c)
+        day4 = times_day_comb(mat,3,c)
+        day5 = times_day_comb(mat,4,c)
+        # total time spent at uni = time of last lect - time of first lect + 1 (to account for the start of the first lecture)
+        if len(day1) > 0: total_1 = day1[len(day1)-1]-day1[0]+1 # if there are lectures that day
+        else: total_1 = 0 # if not total time is 0
+        if len(day2) > 0: total_2 = day2[len(day2)-1]-day2[0]+1
+        else: total_2 = 0
+        if len(day3) > 0: total_3 = day3[len(day3)-1]-day3[0]+1
+        else: total_3 = 0
+        if len(day4) > 0: total_4 = day4[len(day4)-1]-day4[0]+1
+        else: total_4 = 0
+        if len(day5) > 0: total_5 = day5[len(day5)-1]-day5[0]+1
+        else: total_5 = 0
+        obj = obj + 3*total_1 + 3*total_2 + 3*total_3 + 3*total_4 + 3*total_5
+    return obj
+
+# def SC4(mat): # students max 6 hrs/day
+#     obj = 0
+#     for c in range(C_card):
+#         for d in D:
+#             cons = []
+#             span = []
+#             for v in range(d,d+12): # the whole day
+#                 span.append(column(mat,v)) # these are all the units scheduled on day d per room
+#             for i in range(len(span)): # number of rows
+#                 if sum(span[i]) > -7: # if the row is not empty
+#                     for j in range(len(span[0])): # number of col
+#                         if span[i][j] in U_c(c):
+#                             cons = np.append(cons,span[i][j]) # if this array is longer than 4, i.e., more than 4 lectures win a span of 5 timeslots, add a penalty
+#             if len(cons)>6: 
+#                 #print(cons)
+#                 obj = obj + 3*(len(cons)-6)
+#     return obj
+
+def SC4(mat): # students maximum 6 hrs a day
+    obj = 0
+    for c in range(C_card): # for each combination,
+        comb_times = T_c(mat,c) # get an array of the times in which units from this comb are scheduled    
+        day1_count = [tally(comb_times,0,11),0,c] # number of units on day 1
+        day2_count = [tally(comb_times,12,23),1,c] # number of units on day 2
+        day3_count = [tally(comb_times,24,35),2,c] # number of units on day 3
+        day4_count = [tally(comb_times,36,47),3,c] # number of units on day 4
+        day5_count = [tally(comb_times,48,59),4,c] # number of units on day 5
+        # join them in an array to find which exceeds 6
+        joined = [day1_count,day2_count,day3_count,day4_count,day5_count]
+        check = list(filter(lambda j: j[0] > 6, joined))
+        if len(check) > 0: # if there is a day with more than 6 lectures in a day FOR THIS COMBINATION
+            for z in range(len(check)):
+                over = check[z][0] - 6
+                obj = obj + 3*(over)
+    return obj
+
+def SC5(mat): # lecturers' prefered hours
+    obj = 0
+    for l in L:
+        times = T_l(mat,l)
+        for t in times:
+            if t in Q_l(l):
+                obj = obj + 1 
+    return obj
+
+def SC6(mat): # lecturers max 4 hrs/day
+    obj = 0
+    for l in L:
+        times = T_l(mat,l) # times lecturer l is scheduled
+        day1_count = tally(times,0,11) # number of units on day 1
+        day2_count = tally(times,12,23) # number of units on day 2
+        day3_count = tally(times,24,35) # number of units on day 3
+        day4_count = tally(times,36,47) # number of units on day 4
+        day5_count = tally(times,48,59) # number of units on day 5
+        joined = np.append(day1_count,np.append(day2_count,np.append(day3_count,np.append(day4_count,day5_count))))    
+        # if on a day the lecturer is scheduled more than 4 hrs, add two to the objective for each day
+        check = list(filter(lambda  hrs: hrs > 4, joined)) # this will be empty if no violation
+        if len(check) > 0: # if there is a violation
+            obj = obj + len(check)*2
+    return obj
+
+def obj(mat):
+    return SC1(mat) + SC2(mat) + SC3(mat) + SC4(mat) + SC5(mat) + SC6(mat)
+
+
+# NEIGHBOURHOODS
+
+
+def six_day_viols(mat):
+    N = mat.copy()
+    viols = [] # this will be an array of arrays showing the number of lectures scheduled that day
+    for c in range(C_card): # for each combination,
+        comb_times = T_c(N,c) # get an array of the times in which units from this comb are scheduled    
+        day1_count = [tally(comb_times,0,11),0,c] # number of units on day 1
+        day2_count = [tally(comb_times,12,23),1,c] # number of units on day 2
+        day3_count = [tally(comb_times,24,35),2,c] # number of units on day 3
+        day4_count = [tally(comb_times,36,47),3,c] # number of units on day 4
+        day5_count = [tally(comb_times,48,59),4,c] # number of units on day 5
+        # join them in an array to find which exceeds 6
+        joined = [day1_count,day2_count,day3_count,day4_count,day5_count]
+        check = list(filter(lambda j: j[0] > 6, joined))
+        if len(check) > 0: # if there is a day with more than 6 lectures in a day FOR THIS COMBINATION
+            for z in range(len(check)):
+                viols.append(check[z])
+    return viols
+
+def six_day(mat,sdv):
+    N = mat.copy()
+    # viols = [] # this will be an array of arrays showing the number of lectures scheduled that day
+    # for c in range(C_card): # for each combination,
+    #     comb_times = T_c(N,c) # get an array of the times in which units from this comb are scheduled    
+    #     day1_count = [tally(comb_times,0,11),0,c] # number of units on day 1
+    #     day2_count = [tally(comb_times,12,23),1,c] # number of units on day 2
+    #     day3_count = [tally(comb_times,24,35),2,c] # number of units on day 3
+    #     day4_count = [tally(comb_times,36,47),3,c] # number of units on day 4
+    #     day5_count = [tally(comb_times,48,59),4,c] # number of units on day 5
+    #     # join them in an array to find which exceeds 6
+    #     joined = [day1_count,day2_count,day3_count,day4_count,day5_count]
+    #     check = list(filter(lambda j: j[0] > 6, joined))
+    #     if len(check) > 0: # if there is a day with more than 6 lectures in a day FOR THIS COMBINATION
+    #         for z in range(len(check)):
+    #             viols.append(check[z])
+    
+    viols = sdv
+    
+    bin = 0 # binary variable. will take value 1 if at least one unit has been moved. this will stop while loop from chosing another violation to try and minimize
+    while bin == 0:
+        # print('here')
+        # sort this array of arrays by order of number of lectures 
+        maxim = sorted(viols, key=lambda x: x[0], reverse = True)[0][0] # largest violation
+        # if there are multiple days with the largest number of lectures that violate the soft const, choose one at random
+        chosen = random.choice(list(filter(lambda viols: viols[0] == maxim, viols)))
+        # chose the last units from that day after the 6th one
+        move = units_day_comb(N,chosen[1],chosen[2])[6:] # these are the units that we will try to move
+        # start from the unit scheduled last, see if you can schedule it on a day with the least number of units
+        moved = 0
+        for i in list(reversed(move)): # start by scheduling the last unit and move inwards
+            curr_lect = unit_lect(i) # lecturer/s of the unit we are trying to move
+            curr_comb = unit_comb(i) # combination/s of the unit we are trying to move
+        
+            pairs = []
+            for r in R_u(i): 
+                if cap[r] >= s[i]:
+                    for j in range(len(N[0])):
+                        if N[r][j]==-1:
+                            pairs.append([r,j,cap[r]])    
+        
+            # move unit to the day with most empty slots between the last and first lecture
+            free_slots = [] # this array will include th e number of free slots on this day
+            for d in range(5):
+                times = times_day_comb(N,d,chosen[2]) # times units from that comb are scheduled for day d (changed with each iteration)
+                if 1 < len(times) < 6: # if on this day there is more than one unit but less than 6 we can consider moving the unit to this day
+                    free_slots.append([times[len(times)-1]-times[0]-1-(len(times)-2),d] ) 
+                    # last timeslot - first timeslot - 1 - (number of units - 2)
+            free_slots = list(filter(lambda f: f[0] != 0, free_slots)) # no point in trying to reschedule unit to a day with no free slots between last and first lecture
+            # # reschedule unit to the day with the least number of units  (LESS THAN 6)
+            # comb_times = T_c(N,chosen[2]) # get an array of the times in which units from this comb are scheduled
+            # day1_current = [tally(comb_times,0,11),0] # [number of units on day 1, day index]
+            # day2_current = [tally(comb_times,12,23),1] # [number of units on day 2, day index]
+            # day3_current = [tally(comb_times,24,35),2] # number of units on day 3
+            # day4_current = [tally(comb_times,36,47),3] # number of units on day 4
+            # day5_current = [tally(comb_times,48,59),4] # number of units on day 5
+            # joined_2 = [day1_current,day2_current,day3_current,day4_current,day5_current]
+            # # initially, joined_2 will be identical to joined because we havent moved any units yet
+            # app_days = [j for j in joined_2 if  1 < j[0] < 6 ] # these are the days (index) where we can put the extra units into (have < 6 lectures but > 1)
+            # # from these days, choose the one with the least number of units (if more than one choose random)
+            
+            # # while found == 0
+            
+            
+            
+            # the first day we will try to move extra units to is the first one in this array
+            if len(free_slots) > 0:
+                app_days_sorted = sorted(free_slots, key=lambda x: x[0], reverse = True)
+                d = 0
+                while d < len(app_days_sorted): # to go over each appropriate day
+                    curr_day = app_days_sorted[d][1]
+                    f_slot = app_days_sorted[d][0]
+                    unit_times = [int(t) for t in times_day_comb(N,curr_day,chosen[2])]
+                    gaps = np.diff(unit_times) # this array gives the number of empty timeslots (+1) from one lecture to another
+                    largest_gap = max(gaps)
+                    largest_gap_index = list(gaps).index(largest_gap)
+                    # go through the empty timeslots in the largest gap
+                    # but before we need to check that if we add a unit in the first or last timeslot fo the gap, we wont exceed the not more than 4 consecutive lectures soft constraints
+                    # check how many ones there are before and after the largest gap
+                    # check if there are consecutive lectures before start = unit_times[largest_gap_index]
+                    # ASK: >>>>>> DONT NAMILA QBABEL? U TINHADEM DARBA BISS U JUNKLUDI LI SLOTS KOLLA FEJN MA JISTAX IKUNM UNIT IHOR AX IKUN EM IKTAR MINN 4 WARA XULXIN
+                    dont = [] # this array will include the first and last timeslot 
+                    start = unit_times[largest_gap_index]
+                    if len(unit_times[:unit_times.index(start)+1]) >= 4 : # if there are at least four units scheduled BEFORE the largest gap,
+                        # take the array which gives the differences and see if the sum of the last three differences is equal to three
+                        if sum(gaps[largest_gap_index-3:largest_gap_index]) == 3: # if there are 3 ones, this means there are 4 consecutive lectures 
+                        # therefore no unit can be scheduled in the first timeslot of the gap
+                            dont.append(start + 1) # this 
+                    finish = unit_times[largest_gap_index + 1]
+                    # check if there are consecutive lectures after 
+                    if len(unit_times[unit_times.index(finish):]) >= 4 : # if there are at least four units scheduled AFTER the largest gap,
+                        # take the array which gives the differences and see if the sum of the first three differences is equal to three
+                        if sum(gaps[largest_gap_index+1:largest_gap_index+4]) == 3: # if there are 3 ones, this means there are 4 consecutive lectures 
+                        # therefore no unit can be scheduled in the first timeslot of the gap
+                            dont.append(finish - 1) # this 
+                    if f_slot == 1: # if we only have 1 free timeslot in between units,
+                    # if there are already 4 or more units scheduled, then moving unit to this timeslot will cause more than 4 consecutive hrs
+                        if len(unit_times) >= 4:
+                            dont.append(start + 1)
+                    pairs = list(filter(lambda p: start < p[1] < finish, pairs)) # keep the pairs that are within the gap
+                    pairs = list(filter(lambda p: p[1] not in dont , pairs)) # remove the pairs that are in the timeslot that will violate 4 consecutive soft constraint
+                    # remove pairs that have units by the same lecturer or the same combination at that time
+                    p = pairs.copy()
+                    TIMES = []
+                    LECTS = []
+                    for c in unit_comb(i):
+                        TIMES = np.append(TIMES,T_c(N,int(c)))
+                    for l in unit_lect(i):
+                        LECTS = np.append(LECTS,T_l(N,l))
+                    p = list(filter(lambda pair: pair[1] not in TIMES,p))
+                    p = list(filter(lambda pair: pair[1] not in LECTS,p))
+                    # p = pairs.copy()
+                    # for k in p:
+                    #     # current = N[k[0]][k[1]] # current unit we are cosnidering moving pick_unit to 
+                    #     check_col = column(N,k[1]) # all units scheduled at that time
+                    #     # col_check_2.remove(current)
+                    #     check_col = np.unique(check_col)
+                    #     # if col_check_2.size = 1 this means no other unit is scheduled at the same time, therfore there will be no clash
+                    #     clash = 0
+                    #     if check_col.size > 1: # if mrore than one unit is scheduled
+                    #         while clash == 0:
+                    #             for n in range(1,len(check_col)): # start from the second entry (no use in considering -1)
+                    #                 if np.intersect1d(unit_comb(i),unit_comb(check_col[n])).size > 0: # if there will be a combination clash,
+                    #                     p.remove(k)
+                    #                     clash = 1 # if a clash is found, while loop will stop and move to next pair
+                    #                 if clash == 0: # if there was no combination clash, check for lecturer clash
+                    #                     for m in range(1,len(check_col)):
+                    #                         if np.intersect1d(unit_lect(i),unit_lect(check_col[m])).size > 0: # if there will be a lecturer clash,
+                    #                             p.remove(k)
+                    #                             clash = 1
+                    #             break # if no clash is found for this pair, move on to next one 
+                    
+                    if len(p) == 0:
+                        d = d+1
+                    else:
+                        break
+                    
+                if len(p) > 0:
+                    # choose the first available timeslot
+                    sorted_pairs = sorted(p, key=lambda x: x[1]) # pairs sorted by timeslot
+                    first_timeslot_pairs = list(filter(lambda y: y[1] == sorted_pairs[0][1], p)) # pairs witht he first timeslot
+                    # from these, choose the pair with the smallest room available
+                    chosen_pair = sorted(first_timeslot_pairs, key=lambda x: x[2])[0]
+                    # change the original coordinate of the unit we are moving back to -1
+                    original_room = matrix_find(N,i)[0]
+                    original_time = matrix_find(N,i)[1]
+                    N[original_room][original_time] = -1
+                    # put this unit in the new slot
+                    new_room = chosen_pair[0]
+                    new_time = chosen_pair[1]
+                    N[new_room][new_time] = i
+                    moved = moved + 1
+                    print('moved unit',i,'taught by lecturer/s',unit_lect(i),'to room',new_room,'and timeslot',new_time)
+                    # print(i)
+                    # print(chosen_pair)
+            # else:
+            #     print('there are no free slots this unit can be moved to')
+        if moved != 0: # if at least one unit has been moved STOP WHILE LOOP
+            bin = 1
+            if moved < len(move):
+                print('some but not all units were sucessfully rescheduled')
+        else: 
+            viols.remove(chosen)
+        if len(viols) == 0:
+            bin = 1 
+            print('no violation can be changed')
+    return N
+
+
+def hr_viols(mat):
+    N = mat.copy()
+    alone = [] # this will be an array of units that are scheduled alone on a day (no other units from the same combination)
+    for c in range(C_card): # for each combination,
+        comb_times = T_c(N,c) # get an array of the times in which units from this comb are scheduled
+        day1_count = [tally(comb_times,0,11),0,c] # number of units on day 1
+        day2_count = [tally(comb_times,12,23),1,c] # number of units on day 2
+        day3_count = [tally(comb_times,24,35),2,c] # number of units on day 3
+        day4_count = [tally(comb_times,36,47),3,c] # number of units on day 4
+        day5_count = [tally(comb_times,48,59),4,c] # number of units on day 5
+        # join them in an array to find which are scheduled alone
+        joined = [day1_count,day2_count,day3_count,day4_count,day5_count]
+        check = list(filter(lambda j: j[0] == 1, joined))
+        if len(check) > 0: # if there is at least one day with only one lecture (hour) in a day FOR THIS COMBINATION
+            for z in range(len(check)):
+                alone.append(check[z])
+    return alone
+
+
+def hr_move(mat,one_hr_viols): # move all units 
+    N = mat.copy()
+    # alone = [] # this will be an array of units that are scheduled alone on a day (no other units from the same combination)
+    # for c in range(C_card): # for each combination,
+    #     comb_times = T_c(N,c) # get an array of the times in which units from this comb are scheduled
+    #     day1_count = [tally(comb_times,0,11),0,c] # number of units on day 1
+    #     day2_count = [tally(comb_times,12,23),1,c] # number of units on day 2
+    #     day3_count = [tally(comb_times,24,35),2,c] # number of units on day 3
+    #     day4_count = [tally(comb_times,36,47),3,c] # number of units on day 4
+    #     day5_count = [tally(comb_times,48,59),4,c] # number of units on day 5
+    #     # join them in an array to find which are scheduled alone
+    #     joined = [day1_count,day2_count,day3_count,day4_count,day5_count]
+    #     check = list(filter(lambda j: j[0] == 1, joined))
+    #     if len(check) > 0: # if there is at least one day with only one lecture (hour) in a day FOR THIS COMBINATION
+    #         for z in range(len(check)):
+    #             alone.append(check[z])
+
+    alone = one_hr_viols    
+    
+    bin = 0 # binary variable. will take value 1 if at least one unit has been moved. this will stop while loop from chosing another violation to try and minimize
+    while bin == 0:
+        moved = 0 # a 1 will be added for each unit that has been succesfully moved. if it remains 0, a new violation will be chosen
+        
+        chosen = random.choice(alone)
+        curr_comb = chosen[2]  # combination of the unit we are trying to move
+        move = int(units_day_comb(N,chosen[1],curr_comb))
+        curr_lect = unit_lect(move) # lecturer/s of the unit we are trying to move
+        
+        pairs = []
+        for r in R_u(move): 
+            if cap[r] >= s[move]:
+                for j in range(len(N[0])):
+                    if N[r][j]==-1:
+                        pairs.append([r,j,cap[r]])    
+    
+        # move unit to the day with most empty slots between the last and first lecture
+        free_slots = [] # this array will include the number of free slots on this day
+        for d in range(5):
+            times = times_day_comb(N,d,int(curr_comb)) # times units from that comb are scheduled for day d (changed with each iteration)
+            if 1 < len(times) < 6: # if on this day there is more than one unit but less than 6 we can consider moving the unit to this day
+                free_slots.append([times[len(times)-1]-times[0]-1-(len(times)-2),d] ) 
+            # last timeslot - first timeslot - 1 - (number of units - 2)
+        free_slots = list(filter(lambda f: f[0] != 0, free_slots)) # no point in trying to reschedule unit to a day with no free slots between last and first lecture
+
+        
+        # METHOD 1 - using the array of times which units are scheduled
+        # the first day we will try to move extra units to is the first one in this array
+        if len(free_slots) > 0:
+            app_days_sorted = sorted(free_slots, key=lambda x: x[0], reverse = True) # sorting by largest number of free slots available
+            d = 0
+            while d < len(app_days_sorted): # to go over each appropriate day
+                curr_day = app_days_sorted[d][1]
+                f_slot = app_days_sorted[d][0]
+                unit_times = [int(t) for t in times_day_comb(N,curr_day,curr_comb)]
+                gaps = np.diff(unit_times) # this array gives the number of empty timeslots (+1) from one lecture to another
+                largest_gap = max(gaps)
+                largest_gap_index = list(gaps).index(largest_gap)
+                # go through the empty timeslots in the largest gap
+                # but before we need to check that if we add a unit in the first or last timeslot fo the gap, we wont exceed the not more than 4 consecutive lectures soft constraints
+                # check how many ones there are before and after the largest gap
+                # check if there are consecutive lectures before start = unit_times[largest_gap_index]
+                dont = [] # this array will include the first and last timeslot 
+                start = unit_times[largest_gap_index]
+                if len(unit_times[:unit_times.index(start)+1]) >= 4 : # if there are at least four units scheduled BEFORE the largest gap,
+                    # take the array which gives the differences and see if the sum of the last three differences is equal to three
+                    if sum(gaps[largest_gap_index-3:largest_gap_index]) == 3: # if there are 3 ones, this means there are 4 consecutive lectures 
+                    # therefore no unit can be scheduled in the first timeslot of the gap
+                        dont.append(start + 1) # this 
+                finish = unit_times[largest_gap_index + 1]
+                # check if there are consecutive lectures after 
+                if len(unit_times[unit_times.index(finish):]) >= 4 : # if there are at least four units scheduled AFTER the largest gap,
+                    # take the array which gives the differences and see if the sum of the first three differences is equal to three
+                    if sum(gaps[largest_gap_index+1:largest_gap_index+4]) == 3: # if there are 3 ones, this means there are 4 consecutive lectures 
+                    # therefore no unit can be scheduled in the first timeslot of the gap
+                        dont.append(finish - 1) # this 
+                if f_slot == 1: # if we only have 1 free timeslot in between units,
+                # if there are already 4 or more units scheduled, then moving unit to this timeslot will cause more than 4 consecutive hrs
+                    if len(unit_times) >= 4:
+                        dont.append(start + 1)
+                pairs = list(filter(lambda p: start < p[1] < finish, pairs)) # keep the pairs that are within the gap
+                pairs = list(filter(lambda p: p[1] not in dont , pairs)) # remove the pairs that are in the timeslot that will violate 4 consecutive soft constraint
+                # if len(pairs) == 0: 
+                #     print('NO MORE PAIRS LEFT')
+                # remove pairs that have units by the same lecturer or the same combination at that time
+                p = pairs.copy()
+                TIMES = []
+                LECTS = []
+                for c in unit_comb(move):
+                    TIMES = np.append(TIMES,T_c(N,int(c)))
+                for l in unit_lect(move):
+                    LECTS = np.append(LECTS,T_l(N,l))
+                p = list(filter(lambda pair: pair[1] not in TIMES,p))
+                p = list(filter(lambda pair: pair[1] not in LECTS,p))
+                # p = pairs.copy()
+                # for k in p:
+                #     # current = N[k[0]][k[1]] # current unit we are cosnidering moving pick_unit to 
+                #     check_col = column(N,k[1]) # all units scheduled at that time
+                #     # col_check_2.remove(current)
+                #     check_col = np.unique(check_col)
+                #     # if col_check_2.size = 1 this means no other unit is scheduled at the same time, therfore there will be no clash
+                #     clash = 0
+                #     if check_col.size > 1: # if mrore than one unit is scheduled
+                #         while clash == 0:
+                #             for n in range(1,len(check_col)): # start from the second entry (no use in considering -1)
+                #                 if np.intersect1d(unit_comb(move),unit_comb(check_col[n])).size > 0: # if there will be a combination clash,
+                #                     p.remove(k)
+                #                     clash = 1 # if a clash is found, while loop will stop and move to next pair
+                #                 if clash == 0: # if there was no combination clash, check for lecturer clash
+                #                     for m in range(1,len(check_col)):
+                #                         if np.intersect1d(curr_lect,unit_lect(check_col[m])).size > 0: # if there will be a lecturer clash,
+                #                             p.remove(k)
+                #                             clash = 1
+                #             break # if no clash is found for this pair, move on to next one 
+                
+                if len(p) == 0:
+                    d = d+1
+                else:
+                    break
+            
+            if len(p) > 0:
+                # choose the first available timeslot
+                sorted_pairs = sorted(p, key=lambda x: x[1]) # pairs sorted by timeslot
+                first_timeslot_pairs = list(filter(lambda y: y[1] == sorted_pairs[0][1], p)) # pairs witht he first timeslot
+                # from these, choose the pair with the smallest room available
+                chosen_pair = sorted(first_timeslot_pairs, key=lambda x: x[2])[0]
+                # change the original coordinate of the unit we are moving back to -1
+                original_room = matrix_find(N,move)[0]
+                original_time = matrix_find(N,move)[1]
+                N[original_room][original_time] = -1
+                # put this unit in the new slot
+                new_room = chosen_pair[0]
+                new_time = chosen_pair[1]
+                N[new_room][new_time] = move
+                moved = moved + 1
+                print('moved unit',move,'taught by lecturer/s',unit_lect(move),'to room',new_room,'and timeslot',new_time)
+        # else:
+        #      print('there are no free slots this unit can be moved to')
+        if moved != 0: # if at least one unit has been moved STOP WHILE LOOP
+            bin = 1
+        else: 
+            alone.remove(chosen)
+        if len(alone) == 0:
+            bin = 1 
+            print('no violation can be changed')
+    
+    return N
+
+def minimize_times(mat):
+    N = mat.copy()
+    total_times = []
+    for c in range(C_card):
+        day1 = times_day_comb(N,0,c)
+        day2 = times_day_comb(N,1,c)
+        day3 = times_day_comb(N,2,c)
+        day4 = times_day_comb(N,3,c)
+        day5 = times_day_comb(N,4,c)
+        # total time spent at uni = time of last lect - time of first lect + 1 (to account for the start of the first lecture)
+        if len(day1) > 0: total_1 = day1[len(day1)-1]-day1[0]+1 # if there is are lectures that day
+        else: total_1 = 0 # if not total time is 0
+        if len(day2) > 0: total_2 = day2[len(day2)-1]-day2[0]+1
+        else: total_2 = 0
+        if len(day3) > 0: total_3 = day3[len(day3)-1]-day3[0]+1
+        else: total_3 = 0
+        if len(day4) > 0: total_4 = day4[len(day4)-1]-day4[0]+1
+        else: total_4 = 0
+        if len(day5) > 0: total_5 = day5[len(day5)-1]-day5[0]+1
+        else: total_5 = 0
+        #total_times.append([total_1,0,c],[total_2,1,c],[total_3,2,c],[total_4,3,c],[total_5,4,c])
+        # MAKE SHORTER
+        total_times.append([total_1,0,c]) # [time spent at uni, on day _, for students of combination c]
+        total_times.append([total_2,1,c])
+        total_times.append([total_3,2,c])
+        total_times.append([total_4,3,c])
+        total_times.append([total_5,4,c])
+    total_times = list(filter(lambda y: y[0] != 0, total_times))
+    return total_times
+
+def min_time_move(mat,min_times):
+    N = mat.copy()
+    # total_times = []
+    # for c in range(C_card):
+    #     day1 = times_day_comb(N,0,c)
+    #     day2 = times_day_comb(N,1,c)
+    #     day3 = times_day_comb(N,2,c)
+    #     day4 = times_day_comb(N,3,c)
+    #     day5 = times_day_comb(N,4,c)
+    #     # total time spent at uni = time of last lect - time of first lect + 1 (to account for the start of the first lecture)
+    #     if len(day1) > 0: total_1 = day1[len(day1)-1]-day1[0]+1 # if there is are lectures that day
+    #     else: total_1 = 0 # if not total time is 0
+    #     if len(day2) > 0: total_2 = day2[len(day2)-1]-day2[0]+1
+    #     else: total_2 = 0
+    #     if len(day3) > 0: total_3 = day3[len(day3)-1]-day3[0]+1
+    #     else: total_3 = 0
+    #     if len(day4) > 0: total_4 = day4[len(day4)-1]-day4[0]+1
+    #     else: total_4 = 0
+    #     if len(day5) > 0: total_5 = day5[len(day5)-1]-day5[0]+1
+    #     else: total_5 = 0
+    #     #total_times.append([total_1,0,c],[total_2,1,c],[total_3,2,c],[total_4,3,c],[total_5,4,c])
+    #     # MAKE SHORTER
+    #     total_times.append([total_1,0,c]) # [time spent at uni, on day _, for students of combination c]
+    #     total_times.append([total_2,1,c])
+    #     total_times.append([total_3,2,c])
+    #     total_times.append([total_4,3,c])
+    #     total_times.append([total_5,4,c])
+    # total_times = list(filter(lambda y: y[0] != 0, total_times))
+    
+    total_times = min_times
+    
+    bin = 0 # binary variable. will take value 1 if at least one unit has been moved. this will stop while loop from chosing another violation to try and minimize
+    while bin == 0:
+        moved = 0 # a 1 will be added for each unit that has been succesfully moved. if it remains 0, a new violation will be chosen
+         
+        # find which day/days students spend the most time at uni (if multiple with largest time then pick at random)
+        # sorted_times = sorted(total_times, key=lambda x: x[0], reverse = True) # largest to smallest
+        # chosen = random.choice(list(filter(lambda y: y[0] == sorted_times[0][0], total_times)))
+        chosen = random.choice(list(filter(lambda y: y[0] == max(total_times)[0], total_times)))
+        chosen_day = chosen[1]
+        chosen_comb = chosen[2]
+        # move the last unit from this day to a gap
+        units = units_day_comb(N,chosen_day,chosen_comb) # units on this day
+        move = units[len(units)-1]
+        # if on the day with the largest time at uni, there are less than 6 lectures, try to reschedule unit to another timeslot that day
+        #if len(times_day_comb(N,chosen_day,chosen_comb)) < 6: 
+        # if there are more than 6 lectures,
+    
+    
+        curr_lect = unit_lect(move) # lecturer/s of the unit we are trying to move
+        curr_comb = unit_comb(move) # combination/s of the unit we are trying to move
+    
+        pairs = []
+        for r in R_u(move): 
+            if cap[r] >= s[move]:
+                for j in range(len(N[0])):
+                    if N[r][j]==-1:
+                        pairs.append([r,j,cap[r]])    
+    
+        # move unit to the day with most empty slots between the last and first lecture
+        free_slots = [] # this array will include the number of free slots on this day
+        for d in range(5):
+            times = times_day_comb(N,d,chosen_comb) # times unots from that comb are scheduled for day d (changed with each iteration)
+            if 1 < len(times) < 6: # if on this day there is more than one unit but less than 6 we can consider moving the unit to this day
+                free_slots.append([times[len(times)-1]-times[0]-1-(len(times)-2),d] ) 
+            # last timeslot - first timeslot - 1 - (number of units - 2)
+        free_slots = list(filter(lambda f: f[0] != 0, free_slots)) # no point in trying to reschedule unit to a day with no free slots between last and first lecture
+
+        
+        # METHOD 1 - using the array of times which units are scheduled
+        # the first day we will try to move extra units to is the first one in this array
+        if len(free_slots) > 0:
+            app_days_sorted = sorted(free_slots, key=lambda x: x[0], reverse = True) # sorting by largest number of free slots available
+            d = 0
+            while d < len(app_days_sorted): # to go over each appropriate day
+                curr_day = app_days_sorted[d][1]
+                f_slot = app_days_sorted[d][0]
+                unit_times = [int(t) for t in times_day_comb(N,curr_day,chosen_comb)]
+                gaps = np.diff(unit_times) # this array gives the number of empty timeslots (+1) from one lecture to another
+                largest_gap = max(gaps)
+                largest_gap_index = list(gaps).index(largest_gap)
+                # go through the empty timeslots in the largest gap
+                # but before we need to check that if we add a unit in the first or last timeslot fo the gap, we wont exceed the not more than 4 consecutive lectures soft constraints
+                # check how many ones there are before and after the largest gap
+                # check if there are consecutive lectures before start = unit_times[largest_gap_index]
+                # ASK: >>>>>> DONT NAMILA QBABEL? U TINHADEM DARBA BISS U JUNKLUDI LI SLOTS KOLLA FEJN MA JISTAX IKUNM UNIT IHOR AX IKUN EM IKTAR MINN 4 WARA XULXIN
+                dont = [] # this array will include the first and last timeslot 
+                start = unit_times[largest_gap_index]
+                if len(unit_times[:unit_times.index(start)+1]) >= 4 : # if there are at least four units scheduled BEFORE the largest gap,
+                    # take the array which gives the differences and see if the sum of the last three differences is equal to three
+                    if sum(gaps[largest_gap_index-3:largest_gap_index]) == 3: # if there are 3 ones, this means there are 4 consecutive lectures 
+                    # therefore no unit can be scheduled in the first timeslot of the gap
+                        dont.append(start + 1) # this 
+                finish = unit_times[largest_gap_index + 1]
+                # check if there are consecutive lectures after 
+                if len(unit_times[unit_times.index(finish):]) >= 4 : # if there are at least four units scheduled AFTER the largest gap,
+                    # take the array which gives the differences and see if the sum of the first three differences is equal to three
+                    if sum(gaps[largest_gap_index+1:largest_gap_index+4]) == 3: # if there are 3 ones, this means there are 4 consecutive lectures 
+                    # therefore no unit can be scheduled in the first timeslot of the gap
+                        dont.append(finish - 1) # this 
+                if f_slot == 1: # if we only have 1 free timeslot in between units,
+                # if there are already 4 or more units scheduled, then moving unit to this timeslot will cause more than 4 consecutive hrs
+                    if len(unit_times) >= 4:
+                        dont.append(start + 1)
+                pairs = list(filter(lambda p: start < p[1] < finish, pairs)) # keep the pairs that are within the gap
+                pairs = list(filter(lambda p: p[1] not in dont , pairs)) # remove the pairs that are in the timeslot that will violate 4 consecutive soft constraint
+                # if len(pairs) == 0: 
+                #     print('NO MORE PAIRS LEFT')
+                # remove pairs that have units by the same lecturer or the same combination at that time
+                p = pairs.copy()
+                TIMES = []
+                LECTS = []
+                for c in unit_comb(move):
+                    TIMES = np.append(TIMES,T_c(N,int(c)))
+                for l in unit_lect(move):
+                    LECTS = np.append(LECTS,T_l(N,l))
+                p = list(filter(lambda pair: pair[1] not in TIMES,p))
+                p = list(filter(lambda pair: pair[1] not in LECTS,p))
+                # p = pairs.copy()
+                # for k in p:
+                #     # current = N[k[0]][k[1]] # current unit we are cosnidering moving pick_unit to 
+                #     check_col = column(N,k[1]) # all units scheduled at that time
+                #     # col_check_2.remove(current)
+                #     check_col = np.unique(check_col)
+                #     # if col_check_2.size = 1 this means no other unit is scheduled at the same time, therfore there will be no clash
+                #     clash = 0
+                #     if check_col.size > 1: # if mrore than one unit is scheduled
+                #         while clash == 0:
+                #             for n in range(1,len(check_col)): # start from the second entry (no use in considering -1)
+                #                 if np.intersect1d(curr_comb,unit_comb(check_col[n])).size > 0: # if there will be a combination clash,
+                #                     p.remove(k)
+                #                     clash = 1 # if a clash is found, while loop will stop and move to next pair
+                #                 if clash == 0: # if there was no combination clash, check for lecturer clash
+                #                     # for m in range(1,len(check_col)):
+                #                     if np.intersect1d(curr_lect,unit_lect(check_col[n])).size > 0: # if there will be a lecturer clash,
+                #                         p.remove(k)
+                #                         clash = 1
+                #             break # if no clash is found for this pair, move on to next one 
+                
+                if len(p) == 0:
+                    d = d+1
+                else:
+                    break
+        
+            if len(p) > 0:
+                # choose the first available timeslot
+                sorted_pairs = sorted(p, key=lambda x: x[1]) # pairs sorted by timeslot
+                first_timeslot_pairs = list(filter(lambda y: y[1] == sorted_pairs[0][1], p)) # pairs witht he first timeslot
+                # from these, choose the pair with the smallest room available
+                chosen_pair = sorted(first_timeslot_pairs, key=lambda x: x[2])[0]
+                # change the original coordinate of the unit we are moving back to -1
+                original_room = matrix_find(N,move)[0]
+                original_time = matrix_find(N,move)[1]
+                N[original_room][original_time] = -1
+                # put this unit in the new slot
+                new_room = chosen_pair[0]
+                new_time = chosen_pair[1]
+                N[new_room][new_time] = move
+                moved = moved + 1
+                print('moved unit',move,'taught by lecturer/s',unit_lect(move),'to room',new_room,'and timeslot',new_time)
+                # print(move)
+                # print(chosen_pair)
+        # else:
+        #     print('there are no free slots this unit can be moved to')
+    
+        if moved != 0: # if at least one unit has been moved STOP WHILE LOOP
+            bin = 1
+        else: 
+            total_times.remove(chosen)
+            
+            #print(len(total_times))
+        if len(total_times) == 0:
+            bin = 1 
+            print('no time minimization can be done')
+    
+    return N
+
+# function to check if consecutive_move can be done
+def prepare_consecutive(mat): 
+    N = mat.copy()
+    viols = [] # this will be an array with all the instances of five units in a row
+    for c in range(C_card): # for each combination
+        for a in A:
+            cons = []
+            span = []
+            for v in range(a,a+5):
+                span.append(column(N,v)) # these are the 5 timeslots we are considering at a time
+            for i in range(len(span)): # number of rows
+                if sum(span[i]) > -7: # if the row is not empty
+                    for j in range(len(span[0])): # number of cols
+                        if span[i][j] in U_c(c):
+                            cons = np.append(cons,span[i][j]) # if this array is longer than 4, i.e., more than 4 lectures in a span of 5 timeslots, add a penalty
+            if len(cons)>4: 
+                viols.append([cons,c])
+    return viols
+# 25 seconds
+
+# def prepare_consecutive(mat): 
+#     N = rt_mat.copy()
+#     viols = [] # this will be an array with all the instances of five units in a row
+#     for c in range(C_card): # for each combination
+#         for d in range(5):
+#             times = times_day_comb(N,d,c)
+#             times_that_day = times_of_day(d)
+#             if tally(times,times_that_day[0],times_that_day[11]) >= 4:
+#                 for a in times_that_day[:8]:
+#                     cons = []
+#                     span = []
+#                     for v in range(a,a+5):
+#                         span.append(column(N,v)) # these are the 5 timeslots we are considering at a time
+#                     for i in range(len(span)): # number of rows
+#                         if sum(span[i]) > -7: # if the row is not empty
+#                             for j in range(len(span[0])): # number of cols
+#                                 if span[i][j] in U_c(c):
+#                                     cons = np.append(cons,span[i][j]) # if this array is longer than 4, i.e., more than 4 lectures in a span of 5 timeslots, add a penalty
+#                     if len(cons)>4: 
+#                         viols.append([cons,c])
+#     return viols
+# # 30 seconds
+
+def consecutive_move(mat,cons_viols):
+    N = mat.copy()
+    # viols = [] # this will be an array with all the instances of five units in a row
+    # for c in range(C_card): # for each combination
+    #     for a in A:
+    #         cons = []
+    #         span = []
+    #         for v in range(a,a+5):
+    #             span.append(column(N,v)) # these are the 5 timeslots we are considering at a time
+    #         for i in range(len(span)): # number of rows
+    #             if sum(span[i]) > -7: # if the row is not empty
+    #                 for j in range(len(span[0])): # number of cols
+    #                     if span[i][j] in U_c(c):
+    #                         cons = np.append(cons,span[i][j]) # if this array is longer than 4, i.e., more than 4 lectures in a span of 5 timeslots, add a penalty
+    #         if len(cons)>4: 
+    #             viols.append([cons,c]) 
+    # print('len(viols) = ',len(viols))
+    
+    # viols = prepare_consecutive(N)
+    viols = cons_viols
+    # print('len(viols) = ',len(viols))
+    
+    bin = 0 # binary variable. will take value 1 if at least one unit has been moved. this will stop while loop from chosing another violation to try and minimize
+    while len(viols) > 0:
+        # print('inside while loop, len(viols) =', len(viols))
+        moved = 0 # a 1 will be added for each unit that has been succesfully moved. if it remains 0, a new violation will be chosen
+         
+        # from the violations choose one at random and move a random unit from those five to an appropraite gap from another day
+        # UZA LENGTH U DEL FLOK REMOVE
+        ran = random.randrange(len(viols))
+        chosen_viol = viols[ran]
+        # print('chosen_viol = ',chosen_viol)
+        chosen_units = chosen_viol[0]
+        chosen_comb = chosen_viol[1]
+        move = random.choice(chosen_units)   
+        # print(move)
+        combs_move = unit_comb(move)      
+        lects_move = unit_lect(move)
+        
+        
+        # curr_lect = unit_lect(move) # lecturer/s of the unit we are trying to move
+        # curr_comb = random.choice(unit_comb(move)) # combination/s of the unit we are trying to move
+    
+        pairs = []
+        for r in R_u(move): 
+            if cap[r] >= s[move]:
+                for n in range(len(N[0])):
+                    if N[r][n]==-1:
+                        pairs.append([r,n,cap[r]])    
+    
+        # move unit to the day with most empty slots between the last and first lecture
+        free_slots = [] # this array will include the number of free slots on this day
+        for d in range(5):
+            times = times_day_comb(N,d,chosen_comb) # times unots from that comb are scheduled for day d (changed with each iteration)
+            if 1 < len(times) < 6: # if on this day there is more than one unit but less than 6 we can consider moving the unit to this day
+                free_slots.append([times[len(times)-1]-times[0]-1-(len(times)-2),d] ) 
+            # last timeslot - first timeslot - 1 - (number of units - 2)
+        free_slots = list(filter(lambda f: f[0] != 0, free_slots)) # no point in trying to reschedule unit to a day with no free slots between last and first lecture
+        
+        if len(free_slots) > 0:
+            # METHOD 1 - using the array of times which units are scheduled
+            # the first day we will try to move extra units to is the first one in this array
+            app_days_sorted = sorted(free_slots, key=lambda x: x[0], reverse = True) # sorting by largest number of free slots available
+            day = 0
+            while day < len(app_days_sorted): # to go over each appropriate day
+                curr_day = app_days_sorted[day][1]
+                f_slot = app_days_sorted[day][0] # number of free slots on this day
+                unit_times = [int(t) for t in times_day_comb(N,curr_day,chosen_comb)]
+                gaps = np.diff(unit_times) # this array gives the number of empty timeslots (+1) from one lecture to another
+                largest_gap = max(gaps)
+                largest_gap_index = list(gaps).index(largest_gap)
+                # go through the empty timeslots in the largest gap
+                # but before we need to check that if we add a unit in the first or last timeslot fo the gap, we wont exceed the not more than 4 consecutive lectures soft constraints
+                # check how many ones there are before and after the largest gap
+                # check if there are consecutive lectures before start = unit_times[largest_gap_index]
+                dont = [] # this array will include the first and last timeslot 
+                start = unit_times[largest_gap_index]
+                if len(unit_times[:unit_times.index(start)+1]) >= 4 : # if there are at least four units scheduled BEFORE the largest gap,
+                    # take the array which gives the differences and see if the sum of the last three differences is equal to three
+                    if sum(gaps[largest_gap_index-3:largest_gap_index]) == 3: # if there are 3 ones, this means there are 4 consecutive lectures 
+                    # therefore no unit can be scheduled in the first timeslot of the gap
+                        dont.append(start + 1) # this 
+                finish = unit_times[largest_gap_index + 1]
+                # check if there are consecutive lectures after 
+                if len(unit_times[unit_times.index(finish):]) >= 4 : # if there are at least four units scheduled AFTER the largest gap,
+                    # take the array which gives the differences and see if the sum of the first three differences is equal to three
+                    if sum(gaps[largest_gap_index+1:largest_gap_index+4]) == 3: # if there are 3 ones, this means there are 4 consecutive lectures 
+                    # therefore no unit can be scheduled in the first timeslot of the gap
+                        dont.append(finish - 1) # this 
+                if f_slot == 1: # if we only have 1 free timeslot in between units,
+                # if there are already 4 or more units scheduled, then moving unit to this timeslot will cause more than 4 consecutive hrs
+                    if len(unit_times) >= 4:
+                        dont.append(start + 1)
+                pairs = list(filter(lambda p: start < p[1] < finish, pairs)) # keep the pairs that are within the gap
+                pairs = list(filter(lambda p: p[1] not in dont , pairs)) # remove the pairs that are in the timeslot that will violate 4 consecutive soft constraint
+                # if len(pairs) == 0: 
+                #     print('NO MORE PAIRS LEFT')
+                # remove pairs that have units by the same lecturer or the same combination at that time
+                p = pairs.copy()
+                TIMES = []
+                LECTS = []
+                for c in combs_move:
+                    TIMES = np.append(TIMES,T_c(N,int(c)))
+                for l in lects_move:
+                    LECTS = np.append(LECTS,T_l(N,l))
+                p = list(filter(lambda pair: pair[1] not in TIMES,p))
+                p = list(filter(lambda pair: pair[1] not in LECTS,p))
+                # for k in p:
+                #     print(k)
+                #     # current = N[k[0]][k[1]] # current unit we are cosnidering moving pick_unit to 
+                #     check_col = column(N,k[1]) # all units scheduled at that time
+                #     # col_check_2.remove(current)
+                #     check_col = np.unique(check_col)
+                #     # if col_check_2.size = 1 this means no other unit is scheduled at the same time, therfore there will be no clash
+                #     clash = 0
+                #     if check_col.size > 1: # if mrore than one unit is scheduled
+                #         while clash == 0:
+                #             for m in range(1,len(check_col)): # start from the second entry (no use in considering -1)
+                #                 if np.intersect1d(combs_move,unit_comb(check_col[m])).size > 0: # if there will be a combination clash,
+                #                     p.remove(k)
+                #                     clash = 1 # if a clash is found, while loop will stop and move to next pair
+                #                 if clash == 0: # if there was no combination clash, check for lecturer clash
+                #                     #for m in range(1,len(check_col)):
+                #                     if np.intersect1d(lects_move,unit_lect(check_col[m])).size > 0: # if there will be a lecturer clash,
+                #                         p.remove(k)
+                #                         clash = 1
+                #             break # if no clash is found for this pair, move on to next one 
+                
+                if len(p) == 0:
+                    day = day+1
+                else:
+                    break
+            
+            if len(p) > 0:
+                # choose the first available timeslot
+                sorted_pairs = sorted(p, key=lambda x: x[1]) # pairs sorted by timeslot
+                first_timeslot_pairs = list(filter(lambda y: y[1] == sorted_pairs[0][1], p)) # pairs witht he first timeslot
+                # from these, choose the pair with the smallest room available
+                chosen_pair = sorted(first_timeslot_pairs, key=lambda x: x[2])[0]
+                # change the original coordinate of the unit we are moving back to -1
+                original_room = matrix_find(N,move)[0]
+                original_time = matrix_find(N,move)[1]
+                N[original_room][original_time] = -1
+                # put this unit in the new slot
+                new_room = chosen_pair[0]
+                new_time = chosen_pair[1]
+                N[new_room][new_time] = move
+                moved = moved + 1
+                print('moved unit',move,'taught by lecturer/s',lects_move,'to room',new_room,'and timeslot',new_time)
+                # print(move)
+                # print(chosen_pair)
+        # else:
+            # print('there are no free slots this unit can be moved to')
+        
+        if moved > 0: # if at least one unit has been moved STOP WHILE LOOP
+            break    
+            # bin = 1
+        if moved == 0: 
+            # print('here')
+            del viols[ran]
+            # viols.remove(chosen_viol)
+            #print(len(total_times))
+        if len(viols) == 0:
+            # print('HERE')
+            # bin = 1 
+            print('no violation could be changed')
+    
+    return N
+
+
+
+# lecturers' prefered hours swap
+def lect_hr_viols(mat):
+    N = mat.copy()
+    # first obtain an array which inlcudes the lecturer and the hour they are scheduled in which they would like not to be
+    viols = []
+    for l in L:
+        times = T_l(N,l)
+        for t in times:
+            if t in Q_l(l):
+                viols.append([l,t])
+    return viols
+
+# SWAPPING BETWEEN LECTURERS OF THE SAME COMBINATION
+def lect_hrs_swap(mat,lhv):
+    N = mat.copy()
+    # # first obtain an array which inlcudes the lecturer and the hour they are scheduled in which they would like not to be
+    # viols = []
+    # for l in L:
+    #     times = T_l(N,l)
+    #     for t in times:
+    #         if t in Q_l(l):
+    #             viols.append([l,t]) # [lecturer,time] which violate soft constraint
+    # print(len(viols),'initial violations')
+    
+    viols = lhv
+    
+    # from the units that violate thi ssoft constraint, swap it with another one at random
+    #if len(viols) > 0:
+    # bin = 0 # binary variable. will take value 1 if at least one unit has been moved. this will stop while loop from chosing another violation to try and minimize
+    # while bin == 0:
+    while len(viols) > 0:
+        # print('here')
+        
+        moved = 0
+        
+        chosen_viol = random.choice(viols) # violation chosen to move
+        lect_pick = chosen_viol[0]
+        time_pick = chosen_viol[1]
+        day_pick = math.floor(time_pick/12)# day unit is in (floor(timeslot/12) gives day INDEX... + 1 to get the actual day)
+        pick_unit = list(filter(lambda x: x in U_l(lect_pick) ,column(N,time_pick)))[0]
+        comb_pick = unit_comb(pick_unit)
+        lects_pick = unit_lect(pick_unit) # ALL lecturers of pick_unit not just the one we are trying to remove the violation for
+        room_pick = matrix_find(N,pick_unit)[0] # room this unit is held in
+        col_check = column(N,time_pick)
+        col_check.remove(pick_unit)
+        col_check = np.append(-1,col_check)
+        col_check = np.unique(col_check) # this array will either have size 1 which means all entries were originally -1. this means no other unit is scheduled at that time. therefore no clashes
+        # if array has size >1, this means at least one other unit is scheduled at that time
+        # if size > 1, the first entry will be -1 which corresponds to all the slots where no lecture was scheduled, and the rest are units themselves
+        # get room and timeslot pairs that are already occupied (to swap with)
+        pairs = []
+        for i in R_u(pick_unit): # swapping between two units in appropriate rooms
+            if cap[i] >= s[pick_unit]: # if room satisfies capacity for this unit
+                for j in range(len(N[0])):
+                    if N[i][j]>-1: # all occupied timeslots
+                        if N[i][j] != pick_unit:
+                            if s[N[i][j]] <= cap[room_pick]: # if students from this unit can fit into the room of pick_unit
+                                pairs.append([i,j,cap[i]]) # room, time, capacity of room i 
+        # only keep pairs for units that are in the same combination/s
+        pairs = list(filter(lambda b: np.intersect1d(comb_pick,unit_comb(N[b[0]][b[1]])).size > 0 ,pairs))
+        # from those pairs only keep those that are NOT by the same lecturer/s
+        pairs = list(filter(lambda f: np.intersect1d(lect_pick,unit_lect(N[f[0]][f[1]])).size == 0 ,pairs)) 
+        # from these pairs, remove those that correspond to a timeslot the lecturer of pick_unit doesnt want
+        pairs = list(filter(lambda q: q[1] not in Q_l(lect_pick),pairs))
+        # from these remove pairs if a lecturer at that time doesnt want to teach at time of pick_unit
+        for y in pairs:
+            for l in unit_lect(N[y[0]][y[1]]):
+                if time_pick in Q_l(l):
+                        pairs.remove(y)
+                        break # if a unit has multiple lecturers, and one of them doesnt want to be scheduled at the time of the current pair in the first for loop, this pair will be removed. 
+                        # but if the other lecturer also doesnt want this timeslot, we cant remove it because it has already been removed. this will cause an error, therefore loop going over 
+                        # the lecturers of the unit will be broken once a pair has been removed.
+        # catering for maximum 4 hrs a day for lecturers SC
+        # part 1: remove pairs on days where lect_pick already has 4 or more lectures
+        times = T_l(N,lect_pick) # times lecturer l is scheduled
+        day1_count = [tally(times,0,11),0] # number of units on day 1
+        day2_count = [tally(times,12,23),1] # number of units on day 2
+        day3_count = [tally(times,24,35),2] # number of units on day 3
+        day4_count = [tally(times,36,47),3] # number of units on day 4
+        day5_count = [tally(times,48,59),4] # number of units on day 5
+        joined = [day1_count,day2_count,day3_count,day4_count,day5_count]
+        days_rem = [x[1] for x in joined if x[0] >= 4] # days (index) which lect_pick has 4 or more lectures already
+        if len(days_rem) > 0: 
+            for d in days_rem:
+                pairs = list(filter(lambda p: p[1] not in times_of_day(d), pairs))             
+        # part 2: remove pairs if that lecturer already has 4 lectures on day of pick_unit
+        for yy in pairs:
+            for ll in unit_lect(N[yy[0]][yy[1]]):
+                if len(units_day_lect(N,day_pick,ll)) >= 4:
+                    pairs.remove(yy)
+                    break
+        # removing clashes (part 1: removing units that cannot take place of pick_unit)                    
+        p = pairs.copy() # using a copy so when we remove pairs that clash, the index from the original pair does not change
+        if len(col_check) > 1:
+            for j in range(1,len(col_check)):
+                temp_comb = unit_comb(col_check[j])
+                temp_lect = unit_lect(col_check[j])
+                p = list(filter(lambda pair: np.intersect1d(temp_comb, unit_comb(N[pair[0]][pair[1]]) ).size == 0, p))
+                p = list(filter(lambda pair: np.intersect1d(temp_lect ,unit_lect(N[pair[0]][pair[1]]) ).size == 0, p))
+        check_units = []
+        for h in p:
+            current = N[h[0]][h[1]] # current unit we are cosnidering moving pick_unit to 
+            col_check_2 = column(N,h[1]) # all units scheduled at that time
+            col_check_2.remove(current)
+            col_check_2 = np.append(-1,col_check_2)
+            col_check_2 = np.unique(col_check_2)
+            if len(col_check_2) > 1:
+                check_units = np.append(check_units,col_check_2)
+        check_units = np.unique(check_units) # first entry is -1 : ignore this
+        rem_times = []
+        if len(check_units) > 1:
+            for m in range(1,len(check_units)):
+                curr_unit = check_units[m]
+                if np.intersect1d(comb_pick, unit_comb(curr_unit) ).size > 0:
+                    rem_times = np.append(rem_times,matrix_find(N,curr_unit)[1])
+                if np.intersect1d(lects_pick, unit_lect(curr_unit) ).size > 0:
+                    rem_times = np.append(rem_times,matrix_find(N,curr_unit)[1])
+        p = list(filter(lambda pair: pair[1] not in rem_times, p))
+        # for e in p:
+        #     current_unit = N[e[0]][e[1]]
+        #     cu_comb = unit_comb(current_unit)
+        #     cu_lect = unit_lect(current_unit)
+        #     # can't have unit from same combination as current_unit at time of pick_unit 
+        #     clash = 0 # binary variable: 0 - no clash, 1 - clash
+        #     if col_check.size > 1: # only need to check for clahses if other units scheduled at the same time of pick_unit    
+        #         while clash == 0:    
+        #             for j in range(1,len(col_check)): # start from the second entry (no use in considering -1)
+        #                 if np.intersect1d(cu_comb,unit_comb(col_check[j])).size > 0: # if there will be a combination clash,
+        #                     p.remove(e)
+        #                     clash = 1 # if a clash is found, while loop will stop and move to next pair
+        #                 if clash == 0: # if there was no combination clash, check for lecturer clash
+        #                     for k in range(1,len(col_check)):
+        #                         if np.intersect1d(cu_lect,unit_lect(col_check[k])).size > 0: # if there will be a lecturer clash,
+        #                             p.remove(e)
+        #                             clash = 1
+        #             break # if no clash is found for this pair, move on to next one
+        # # part 2: removing units if pick_unit cannot go in their place
+        # for h in p:
+        #     current = N[h[0]][h[1]] # current unit we are cosnidering moving pick_unit to 
+        #     col_check_2 = column(N,h[1]) # all units scheduled at that time
+        #     col_check_2.remove(current)
+        #     col_check_2 = np.unique(col_check_2)
+        #     # if col_check_2.size = 1 this means no other unit is scheduled at the same time, therfore there will be no clash
+        #     clash_2 = 0
+        #     if col_check_2.size > 1: # if mrore than one unit is scheduled
+        #         while clash_2 == 0:
+        #             for j in range(1,len(col_check_2)): # start from the second entry (no use in considering -1)
+        #                 if np.intersect1d(comb_pick,unit_comb(col_check_2[j])).size > 0: # if there will be a combination clash,
+        #                     p.remove(h)
+        #                     clash_2 = 1 # if a clash is found, while loop will stop and move to next pair
+        #                 if clash_2 == 0: # if there was no combination clash, check for lecturer clash
+        #                     #for m in range(1,len(col_check_2)):
+        #                     if np.intersect1d(lects_pick,unit_lect(col_check_2[j])).size > 0: # if there will be a lecturer clash,
+        #                         p.remove(h)
+        #                         clash_2 = 1
+        #             break # if no clash is found for this pair, move on to next one 
+        if len(p) > 0:
+            # if there is a unit that can be swapped with pick_unit, choose one at randoma nd do the swap
+            pick_pair = random.choice(p)
+            swap_unit = N[pick_pair[0]][pick_pair[1]] # unit we are swapping with
+            r2 = pick_pair[0] # room of this unit
+            p2 = pick_pair[1] # timeslot of this unit
+            # swapping positions
+            N[room_pick][time_pick] = swap_unit # swap_unit takes place of pick_unit
+            N[r2][p2] = pick_unit # pick_unit takes place of swap_unit
+            moved = moved + 1
+            print('swapped unit',pick_unit,'taught by lecturer/s',lects_pick,'with unit',swap_unit,'taught by lecturer/s',unit_lect(swap_unit))
+        else: 
+            print('MOVE CANNOT BE DONE')
+        
+        if moved > 0: # if unit has been moved STOP WHILE LOOP
+            # bin = 1
+            break
+        if moved == 0: 
+            viols.remove(chosen_viol)
+            # print(len(viols),'left')
+        if len(viols) == 0:
+            # print('no more viols: entered here')
+            break 
+            
+    # else:
+    #     print('NO VIOLATIONS')     
+    
+    return N
+
+def lect_max_four_viols(mat):
+    N = mat.copy()
+    viols = [] 
+    for l in L: # for each lecturer,
+        times = T_l(N,l) # get an array of the times in which units taught by this lecturer are scheduled
+        day1_count = [tally(times,0,11),l,0] # number of units on day 1
+        day2_count = [tally(times,12,23),l,1] # number of units on day 2
+        day3_count = [tally(times,24,35),l,2] # number of units on day 3
+        day4_count = [tally(times,36,47),l,3] # number of units on day 4
+        day5_count = [tally(times,48,59),l,4] # number of units on day 5
+        # join them in an array to find which exceeds 4 in a day
+        joined = [day1_count,day2_count,day3_count,day4_count,day5_count]
+        # joined = [units(>4),day,lecturer]
+        check = list(filter(lambda j: j[0] > 4, joined))
+        if len(check) > 0: # if there is a day with more than 4 lectures in a day FOR THIS LECTURER
+            for z in range(len(check)):
+                viols.append(check[z])
+    return viols
+
+def lect_max_four_swap(mat,lm4v):
+    N = mat.copy()
+    # viols = [] 
+    # for l in L: # for each lecturer,
+    #     times = T_l(N,l) # get an array of the times in which units taught by this lecturer are scheduled
+    #     day1_count = [tally(times,0,11),l,0] # number of units on day 1
+    #     day2_count = [tally(times,12,23),l,1] # number of units on day 2
+    #     day3_count = [tally(times,24,35),l,2] # number of units on day 3
+    #     day4_count = [tally(times,36,47),l,3] # number of units on day 4
+    #     day5_count = [tally(times,48,59),l,4] # number of units on day 5
+    #     # join them in an array to find which exceeds 4 in a day
+    #     joined = [day1_count,day2_count,day3_count,day4_count,day5_count]
+    #     # joined = [units(>4),day,lecturer]
+    #     check = list(filter(lambda j: j[0] > 4, joined))
+    #     if len(check) > 0: # if there is a day with more than 4 lectures in a day FOR THIS LECTURER
+    #         for z in range(len(check)):
+    #             viols.append(check[z])
+    
+    viols = lm4v
+    #print(len(viols),'initial violations')
+        
+    #if len(viols) > 0:
+    # bin = 0 # binary variable. will take value 1 if at least one unit has been moved. this will stop while loop from chosing another violation to try and minimize
+    # while bin == 0:
+    while len(viols) > 0:
+        max_viol = sorted(viols, key=lambda v: v[0], reverse = True)[0][0]
+        # if there are multiple (maximum) violations, choose one at random to move
+        chosen_viol = random.choice(list(filter(lambda viol: viol[0] == max_viol, viols))) # slot chosen to move
+        lect_pick = chosen_viol[1]
+        day_pick = chosen_viol[2]
+        viol_units = units_day_lect(N,day_pick,lect_pick)[4:] # [4:] # units (>4) by the same lecturer in one day (to move one at random)
+        moved = 0 # a 1 will be added for each unit that has been succesfully moved. if it remains 0, a new violation will be chosen
+        for u in list(reversed(viol_units)): # start rescheduling from the last unit of the day
+            pick_unit = u
+            comb_pick = unit_comb(pick_unit)
+            lects_pick = unit_lect(pick_unit) # ALL lecturers of pick_unit not just the one we are trying to remove the violation for
+            room_pick = matrix_find(N,pick_unit)[0]
+            time_pick = matrix_find(N,pick_unit)[1]
+            col_check = column(N,time_pick)
+            col_check.remove(pick_unit)
+            col_check = np.append(-1,col_check)
+            col_check = np.unique(col_check) # this array will either have size 1 which means all entries were originally -1. this means no other unit is scheduled at that time. therefore no clashes
+            # if array has size >1, this means at least one other unit is scheduled at that time
+            # if size > 1, the first entry will be -1 which corresponds to all the slots where no lecture was scheduled, and the rest are units themselves
+            # get room and timeslot pairs that are already occupied (to swap with)
+            pairs = []
+            for i in R_u(pick_unit): # swapping between two units in appropriate rooms
+                if cap[i] >= s[pick_unit]: # if room satisfies capacity for this unit
+                    for j in range(len(N[0])):
+                        if N[i][j]>-1: # all occupied timeslots
+                            if N[i][j] != pick_unit:
+                                if s[N[i][j]] <= cap[room_pick]: # if students from this unit can fit into the room of pick_unit
+                                    pairs.append([i,j,cap[i]]) # room, time, capacity of room i 
+            # only keep pairs for units that are in the same combination/s
+            pairs = list(filter(lambda b: np.intersect1d(comb_pick,unit_comb(N[b[0]][b[1]])).size > 0 ,pairs))
+            # from those pairs only keep those that are NOT by the same lecturer/s
+            pairs = list(filter(lambda f: np.intersect1d(lect_pick,unit_lect(N[f[0]][f[1]])).size == 0 ,pairs)) 
+            # from these pairs, remove those that correspond to a timeslot the lecturer of pick_unit doesnt want
+            pairs = list(filter(lambda q: q[1] not in Q_l(lect_pick),pairs))
+            # from these remove pairs if a lecturer at that time doesnt want to teach at time of pick_unit
+            for y in pairs:
+                for l in unit_lect(N[y[0]][y[1]]):
+                    if time_pick in Q_l(l):
+                            pairs.remove(y)
+                            break # if a unit has multiple lecturers, and one of them doesnt want to be scheduled at the time of the current pair in the first for loop, this pair will be removed. 
+                            # but if the other lecturer also doesnt want this timeslot, we cant remove it because it has already been removed. this will cause an error, therefore loop going over 
+                            # the lecturers of the unit will be broken once a pair has been removed.
+            # catering for maximum 4 hrs a day for lecturers SC
+            # part 1: remove pairs on days where lect_pick already has 4 or more lectures
+            times = T_l(N,lect_pick) # times lecturer l is scheduled
+            day1_count = [tally(times,0,11),0] # number of units on day 1
+            day2_count = [tally(times,12,23),1] # number of units on day 2
+            day3_count = [tally(times,24,35),2] # number of units on day 3
+            day4_count = [tally(times,36,47),3] # number of units on day 4
+            day5_count = [tally(times,48,59),4] # number of units on day 5
+            joined = [day1_count,day2_count,day3_count,day4_count,day5_count]
+            days_rem = [x[1] for x in joined if x[0] >= 4] # days (index) which lect_pick has 4 or more lectures already
+            if len(days_rem) > 0: 
+                for d in days_rem:
+                    pairs = list(filter(lambda p: p[1] not in times_of_day(d), pairs))             
+            # part 2: remove pairs if that lecturer already has 4 lectures on day of pick_unit
+            for yy in pairs:
+                for ll in unit_lect(N[yy[0]][yy[1]]):
+                    if len(units_day_lect(N,day_pick,ll)) >= 4:
+                        pairs.remove(yy)
+                        break
+            # removing clashes (part 1: removing units that cannot take place of pick_unit)                    
+            p = pairs.copy() # using a copy so when we remove pairs that clash, the index from the original pair does not change
+            if len(col_check) > 1:
+                for j in range(1,len(col_check)):
+                    temp_comb = unit_comb(col_check[j])
+                    temp_lect = unit_lect(col_check[j])
+                    p = list(filter(lambda pair: np.intersect1d(temp_comb, unit_comb(N[pair[0]][pair[1]]) ).size == 0, p))
+                    p = list(filter(lambda pair: np.intersect1d(temp_lect ,unit_lect(N[pair[0]][pair[1]]) ).size == 0, p))
+            check_units = []
+            for h in p:
+                current = N[h[0]][h[1]] # current unit we are cosnidering moving pick_unit to 
+                col_check_2 = column(N,h[1]) # all units scheduled at that time
+                col_check_2.remove(current)
+                col_check_2 = np.append(-1,col_check_2)
+                col_check_2 = np.unique(col_check_2)
+                if len(col_check_2) > 1:
+                    check_units = np.append(check_units,col_check_2)
+            check_units = np.unique(check_units) # first entry is -1 : ignore this
+            rem_times = []
+            if len(check_units) > 1:
+                for m in range(1,len(check_units)):
+                    curr_unit = check_units[m]
+                    if np.intersect1d(comb_pick, unit_comb(curr_unit) ).size > 0:
+                        rem_times = np.append(rem_times,matrix_find(N,curr_unit)[1])
+                    if np.intersect1d(lects_pick, unit_lect(curr_unit) ).size > 0:
+                        rem_times = np.append(rem_times,matrix_find(N,curr_unit)[1])
+            p = list(filter(lambda pair: pair[1] not in rem_times, p))
+
+            # for e in p:
+            #     current_unit = N[e[0]][e[1]]
+            #     cu_comb = unit_comb(current_unit)
+            #     cu_lect = unit_lect(current_unit)
+            #     # can't have unit from same combination as current_unit at time of pick_unit 
+            #     clash = 0 # binary variable: 0 - no clash, 1 - clash
+            #     if col_check.size > 1: # only need to check for clahses if other units scheduled at the same time of pick_unit    
+            #         while clash == 0:    
+            #             for j in range(1,len(col_check)): # start from the second entry (no use in considering -1)
+            #                 if np.intersect1d(cu_comb,unit_comb(col_check[j])).size > 0: # if there will be a combination clash,
+            #                     p.remove(e)
+            #                     clash = 1 # if a clash is found, while loop will stop and move to next pair
+            #                 if clash == 0: # if there was no combination clash, check for lecturer clash
+            #                     #for k in range(1,len(col_check)):
+            #                     if np.intersect1d(cu_lect,unit_lect(col_check[j])).size > 0: # if there will be a lecturer clash,
+            #                         p.remove(e)
+            #                         clash = 1
+            #             break # if no clash is found for this pair, move on to next one
+            # part 2: removing units if pick_unit cannot go in their place       
+            # for h in p:
+            #     current = N[h[0]][h[1]] # current unit we are cosnidering moving pick_unit to 
+            #     col_check_2 = column(N,h[1]) # all units scheduled at that time
+            #     col_check_2.remove(current)
+            #     col_check_2 = np.unique(col_check_2)
+            #     # if col_check_2.size = 1 this means no other unit is scheduled at the same time, therfore there will be no clash
+            #     clash_2 = 0
+            #     if col_check_2.size > 1: # if mrore than one unit is scheduled
+            #         while clash_2 == 0:
+            #             for j in range(1,len(col_check_2)): # start from the second entry (no use in considering -1)
+            #                 if np.intersect1d(comb_pick,unit_comb(col_check_2[j])).size > 0: # if there will be a combination clash,
+            #                     p.remove(h)
+            #                     clash_2 = 1 # if a clash is found, while loop will stop and move to next pair
+            #                 if clash_2 == 0: # if there was no combination clash, check for lecturer clash
+            #                     #for m in range(1,len(col_check_2)):
+            #                     if np.intersect1d(lects_pick,unit_lect(col_check_2[j])).size > 0: # if there will be a lecturer clash,
+            #                         p.remove(h)
+            #                         clash_2 = 1
+            #             break # if no clash is found for this pair, move on to next one 
+            if len(p) > 0:
+                # if there is a unit that can be swapped with pick_unit, choose one at randoma nd do the swap
+                pick_pair = random.choice(p)
+                swap_unit = N[pick_pair[0]][pick_pair[1]] # unit we are swapping with
+                r2 = pick_pair[0] # room of this unit
+                p2 = pick_pair[1] # timeslot of this unit
+                # swapping positions
+                N[room_pick][time_pick] = swap_unit # swap_unit takes place of pick_unit
+                N[r2][p2] = pick_unit # pick_unit takes place of swap_unit
+                moved = moved + 1
+                print('swapped unit',pick_unit,'taught by lecturer/s',lects_pick,'with unit',swap_unit,'taught by lecturer/s',unit_lect(swap_unit))
+            # else: 
+            #     print('MOVE CANNOT BE DONE FOR THIS UNIT')
+        
+        if moved > 0: # if unit has been moved STOP WHILE LOOP
+            # bin = 1
+            if moved < len(viol_units):
+                print('some but not all units were sucessfully rescheduled')
+            break
+        if moved == 0: 
+            viols.remove(chosen_viol)
+            #print(len(viols),'left')
+        if len(viols) == 0:
+            #print('no more viols: entered here')
+            break 
+    
+        # if len(viols) == 0:
+        #     bin = 1
+    # else:
+    #     print('NO VIOLATIONS')
+    return N
+
+
+def lect_swap(mat):
+    N = mat.copy()
+    all_units = units.copy() # these are all the units we can chose to swap from
+    # using a copy because if a unit couldnt be swapped, we will remove this from the array and try again
+    # unit will only be removed from the copy and not from the actual array containing all the units 
+    # pick a random unit to move
+    # making global variable so we can use it outside this function and it would be the exact same value
+    moved = 0
+    while len(all_units) > 0:
+        pick_unit = random.choice(all_units) # picks a random unit from the array units
+        #print('trying to move',pick_unit)
+        #print(pick_unit)
+        comb_pick = unit_comb(pick_unit)
+        lect_pick = unit_lect(pick_unit)
+        # check column after excluding pick_unit
+        time_pick = matrix_find(N,pick_unit)[1] # timeslot of pick_unit
+        room_pick = matrix_find(N,pick_unit)[0] # room this unit is held in
+        col_check = column(N,time_pick)
+        col_check.remove(pick_unit)
+        col_check = np.append(-1,col_check)
+        col_check = np.unique(col_check) # this array will either have size 1 which means all entries were originally -1. this means no other unit is scheduled at that time. therefore no clashes
+        # if array has size >1, this means at least one other unit is scheduled at that time
+        # if size > 1, the first entry will be -1 which corresponds to all the slots where no lecture was scheduled, and the rest are units themselves
+        # rooms = R_u(pick_unit) # app_rooms for this unit
+        # get room and timeslot pairs that are already occupied
+        pairs = []
+        for i in R_u(pick_unit): # swapping between two units in appropriate rooms
+        # aurtomatically this means we are swapping between units in the same combination
+            if cap[i] >= s[pick_unit]: # if room satisfies capacity for this unit
+                for j in range(len(N[0])):
+                    if N[i][j]>-1: # all occupied timeslots
+                        if N[i][j] != pick_unit:
+                            if room_pick in R_u(N[i][j]):
+                                if s[N[i][j]] <= cap[room_pick]: # if students from this unit can fit into the room of pick_unit
+                                    pairs.append([i,j,cap[i]]) # room, time, capacity of room i 
+        
+        # removing clashes (part 1: removing units that cannot take place of pick_unit)                    
+        p = pairs.copy() # using a copy so when we remove pairs that clash, the index from the original pair does not change
+        if len(col_check) > 1:
+            for j in range(1,len(col_check)):
+                temp_comb = unit_comb(col_check[j])
+                temp_lect = unit_lect(col_check[j])
+                p = list(filter(lambda pair: np.intersect1d(temp_comb, unit_comb(N[pair[0]][pair[1]]) ).size == 0, p))
+                p = list(filter(lambda pair: np.intersect1d(temp_lect ,unit_lect(N[pair[0]][pair[1]]) ).size == 0, p))
+        check_units = []
+        for h in p:
+            current = N[h[0]][h[1]] # current unit we are cosnidering moving pick_unit to 
+            col_check_2 = column(N,h[1]) # all units scheduled at that time
+            col_check_2.remove(current)
+            col_check_2 = np.append(-1,col_check_2)
+            col_check_2 = np.unique(col_check_2)
+            if len(col_check_2) > 1:
+                check_units = np.append(check_units,col_check_2)
+        check_units = np.unique(check_units) # first entry is -1 : ignore this
+        rem_times = []
+        if len(check_units) > 1:
+            for m in range(1,len(check_units)):
+                curr_unit = check_units[m]
+                if np.intersect1d(comb_pick, unit_comb(curr_unit) ).size > 0:
+                    rem_times = np.append(rem_times,matrix_find(N,curr_unit)[1])
+                if np.intersect1d(lect_pick, unit_lect(curr_unit) ).size > 0:
+                    rem_times = np.append(rem_times,matrix_find(N,curr_unit)[1])
+        p = list(filter(lambda pair: pair[1] not in rem_times, p))
+        
+        if len(p) > 0:
+            pick_pair = random.choice(p)
+            r2 = pick_pair[0] # room of this unit
+            p2 = pick_pair[1] # timeslot of this unit
+            swap_unit = N[r2][p2] # unit we are swapping with
+            # swapping positions
+            N[room_pick][time_pick] = swap_unit # swap_unit takes place of pick_unit
+            N[r2][p2] = pick_unit # pick_unit takes place of swap_unit
+            moved = moved + 1
+            print('swapped unit',pick_unit,'taught by lecturer/s',lect_pick,'with unit',swap_unit,'taught by lecturer/s',unit_lect(swap_unit))
+        else:
+            print('this unit couldnt be swapped')
+            
+        if moved > 0:
+            break
+        if moved == 0:
+            all_units.remove(pick_unit)
+        
+    return N
+
+#%% ALGORITHM
+
+
+f = open("objective_yr1-4.txt","w") # save objective value progression in text file
+g = open("move_yr1-4.txt","w") # save selected neighbourhood in text file
+
+start_time = time.time()
+
+
+iter = list(range(400)) # no. of iterations (increase)
+objective = []
+initial = rt_mat.copy() # feasible solution
+obj_best = obj(rt_mat) # objective to beats
+objective = np.append(objective,obj_best)
+print(obj_best)
+f.write(str(obj_best))
+f.write('\n')
+candidate = initial # initially starting with candidate timetable being same as feasible one
+for i in iter:
+    print('iteration',i)
+    vec = [1,1,2,2,2,3,3,3,4,4,4,5,6,6,7,7,7] 
+    # each number corresponds to a neighborhood (a soft constraint) and it is repeated the same number of times as the weight of the sc
+    # check at each iteration what sc are being violated
+    # if for that iteration a sc is not violated, remove its corresponding number from vec so it will not be chosen
+    viols_1hr = hr_viols(candidate)
+    viols_consecutive = prepare_consecutive(candidate)
+    times_minimize = minimize_times(candidate)
+    viols_6day = six_day_viols(candidate)
+    viols_lect_hrs = lect_hr_viols(candidate)
+    viols_lect_max4 = lect_max_four_viols(candidate)
+    if len(viols_1hr) == 0: vec = list(filter(lambda no: no != 1, vec))
+    if len(viols_consecutive) == 0: vec = list(filter(lambda no: no != 2, vec))
+    if len(times_minimize) == 0: vec = list(filter(lambda no: no != 3, vec))
+    if len(viols_6day) == 0: vec = list(filter(lambda no: no != 4, vec))
+    if len(viols_lect_hrs) == 0: vec = list(filter(lambda no: no != 5, vec))
+    if len(viols_lect_max4) == 0: vec = list(filter(lambda no: no != 6, vec))
+    ran = random.choice(vec)
+    if ran == 1:
+        print('doing hr_smove')
+        g.write("doing hr_move")
+        g.write('\n')
+        current = hr_move(candidate,viols_1hr) # neighborhood we are currently considering
+    if ran == 2:
+        print('doing consecutive_move')
+        g.write("doing consecutive_move")
+        g.write('\n')
+        current = consecutive_move(candidate,viols_consecutive)
+    if ran == 3:
+        print('doing min_time_move')
+        g.write("doing min_time_move")
+        g.write('\n')
+        current = min_time_move(candidate,times_minimize)
+    if ran == 4:
+        print('doing six_day_move')
+        g.write("doing six_day_move")
+        g.write('\n')
+        current = six_day(candidate,viols_6day)
+    if ran == 5:
+        print('doing lect_hrs_swap')
+        g.write("doing lect_hrs_swap")
+        g.write('\n')
+        current = lect_hrs_swap(candidate,viols_lect_hrs)
+    if ran == 6:
+        print('doing lect_max_four_swap')
+        g.write("doing lect_max_four_swap")
+        g.write('\n')
+        current = lect_max_four_swap(candidate,viols_lect_max4)
+    if ran == 7:
+        print('doing lect_swap')
+        g.write("doing lect_swap")
+        current = lect_swap(candidate)
+    obj_current = obj(current) # its objective. objective of neighborhood
+    if ran != 7:
+        if obj_current < obj_best: # if objective less than that of feasible solution
+            candidate = current # new timetable we are considering
+            obj_best = obj_current # new objective to beat
+            objective = np.append(objective,obj_best)
+    if ran == 7:
+        if obj_current <= obj_best: # if objective less than that of feasible solution
+            candidate = current # new timetable we are considering
+            obj_best = obj_current # new objective to beat
+            objective = np.append(objective,obj_best)
+            print('lect_swap was successful')
+            g.write('...lect_swap was successful')
+            g.write('\n')
+        else: 
+            print('lect_swap was NOT successful')
+            g.write('...lect_swap was NOT successful')
+            g.write('\n')
+    f.write(str(obj_best))
+    f.write('\n')
+    print(obj_best)
+print(candidate) # final timetable
+
+print("--- %s seconds ---" % (time.time() - start_time))
+
+f.close()
+g.close()
+y = objective
+x = list(range(1,len(y)+1))
+plt.plot(x, y, color="red")
+
+
+
+
